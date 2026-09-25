@@ -15,6 +15,8 @@ extend=True のときは、a / b の先へエッジリングを辿って折れ�
 隣のループを越えてスライドできるようにする。
 """
 
+import math
+
 from mathutils import Vector
 
 MAX_WALK = 256
@@ -228,12 +230,15 @@ def fit_plane_normal(points, squarings=12):
     return best.normalized()
 
 
-def intersect_rail_plane(points, center, ref_co, normal, plane_pt, extend=True):
-    """レール折れ線と平面の交点を返す。
+def intersect_rail_plane_ex(points, center, ref_co, normal, plane_pt,
+                            extend=True):
+    """レール折れ線と平面の交点を (座標, 交差したか) で返す。
 
     交点が複数あるときは ref_co に最も近いものを採用（安定性のため
     ref_co には invoke 時の元座標を渡す）。
-    交点が無ければ、平面に最も近い端点へクランプする。
+    交点が無ければ、平面に最も近い端点へクランプして False を返す。
+    クランプは「目標平面まで届かなかった」＝結果が平面に乗らないことを
+    意味するので、呼び出し側はこれを数えてユーザーに知らせること。
     """
     rng = range(len(points) - 1) if extend else [center]
     s = [(p - plane_pt).dot(normal) for p in points]
@@ -254,12 +259,20 @@ def intersect_rail_plane(points, center, ref_co, normal, plane_pt, extend=True):
         if d < best_d:
             best_d, best = d, p
     if best is not None:
-        return best
+        return best, True
 
     # 交点なし: レールの端から出てしまったので端点へクランプ
     idx = list(rng)
     cand = [idx[0], idx[-1] + 1]
-    return min((points[i] for i in cand), key=lambda p: abs((p - plane_pt).dot(normal)))
+    clamped = min((points[i] for i in cand),
+                  key=lambda p: abs((p - plane_pt).dot(normal)))
+    return clamped, False
+
+
+def intersect_rail_plane(points, center, ref_co, normal, plane_pt, extend=True):
+    """交点の座標だけを返す薄いラッパ。"""
+    return intersect_rail_plane_ex(points, center, ref_co, normal, plane_pt,
+                                   extend)[0]
 
 
 def fix_selection_to_plane(bm, extend=True):
@@ -274,21 +287,25 @@ def fix_selection_to_plane(bm, extend=True):
     plane_pt = sum((v.co for v in sel), Vector()) / len(sel)
 
     blocked = set(sel)
-    results, skipped = [], 0
+    results, skipped, clamped = [], 0, 0
     for v in sel:
         rail = build_rail(v, blocked, extend=extend)
         if rail is None or len(rail[0]) < 2:
             skipped += 1
             continue
         points, center = rail
-        results.append((v, intersect_rail_plane(points, center, v.co,
-                                                normal, plane_pt, extend)))
+        co, hit = intersect_rail_plane_ex(points, center, v.co,
+                                          normal, plane_pt, extend)
+        if not hit:
+            clamped += 1
+        results.append((v, co))
 
     max_delta = 0.0
     for v, co in results:
         max_delta = max(max_delta, (co - v.co).length)
         v.co = co
-    return {"moved": len(results), "skipped": skipped, "max_delta": max_delta}
+    return {"moved": len(results), "skipped": skipped, "max_delta": max_delta,
+            "clamped": clamped}
 
 
 # --------------------------------------------------------------------------
@@ -301,9 +318,10 @@ class RailCache:
     entries: [(vert, orig_co, points|None, center)]
     """
 
-    __slots__ = ("entries", "pivot", "railless", "normal0")
+    __slots__ = ("entries", "pivot", "railless", "normal0", "last_clamped")
 
     def __init__(self, verts, extend_build=True):
+        self.last_clamped = 0
         blocked = set(verts)
         self.entries = []
         self.railless = 0
@@ -328,6 +346,32 @@ class RailCache:
         for v, orig, _p, _c in self.entries:
             v.co = orig.copy()
 
+    def apply_plane(self, normal, plane_pt, extend=True, fallback_mat=None):
+        """目標平面 (normal, plane_pt) を直接指定して、各レールとの交点へ移す。
+
+        行列を経由しないので、「この面の法線に揃える」のように回転量ではなく
+        姿勢そのものが決まっている操作は、これを直接呼べばよい。
+
+        レールを持たない頂点は fallback_mat があればそれを適用し、
+        無ければ元位置のまま（平面だけでは行き先が決まらないため）。
+
+        戻り値: 平面と交差できず端点へクランプした頂点数。
+        0 でなければ結果は平面に乗っていないので、呼び出し側で知らせること。
+        """
+        n = normal.normalized()
+        clamped = 0
+        for v, orig, points, center in self.entries:
+            if points is None:
+                v.co = (fallback_mat @ orig) if fallback_mat else orig.copy()
+                continue
+            co, hit = intersect_rail_plane_ex(points, center, orig,
+                                              n, plane_pt, extend)
+            if not hit:
+                clamped += 1
+            v.co = co
+        self.last_clamped = clamped
+        return clamped
+
     def apply_matrix(self, mat, extend=True, mode='NEAREST'):
         """orig 座標に mat を適用してからレールへ乗せ直す。
 
@@ -337,16 +381,12 @@ class RailCache:
         mode='PLANE'   : ループ全体を1枚の平面として扱い、レールとの交点を取る
         """
         if mode == 'PLANE' and self.normal0 is not None:
-            normal = (mat.to_3x3() @ self.normal0).normalized()
-            plane_pt = mat @ self.pivot
-            for v, orig, points, center in self.entries:
-                if points is None:
-                    v.co = mat @ orig
-                    continue
-                v.co = intersect_rail_plane(points, center, orig,
-                                            normal, plane_pt, extend)
+            # 行列は「目標平面を作る手段」でしかないので、ここで平面に還元する
+            self.apply_plane((mat.to_3x3() @ self.normal0), mat @ self.pivot,
+                             extend=extend, fallback_mat=mat)
             return 0.0
 
+        self.last_clamped = 0
         max_off = 0.0
         for v, orig, points, center in self.entries:
             target = mat @ orig
@@ -367,3 +407,59 @@ def rotation_matrix_about(axis, angle, pivot):
     from mathutils import Matrix
     R = Matrix.Rotation(angle, 4, axis.normalized())
     return Matrix.Translation(pivot) @ R @ Matrix.Translation(-pivot)
+
+
+# --------------------------------------------------------------------------
+# 姿勢 → 回転量の逆算（スナップ用）
+# --------------------------------------------------------------------------
+
+def snap_angle(angle, step):
+    """angle を step 刻みへ丸める。"""
+    if step <= 0.0:
+        return angle
+    return round(angle / step) * step
+
+
+def _project_out(vec, axis):
+    """axis 成分を抜いた（axis に垂直な平面へ射影した）ベクトル。"""
+    return vec - axis * vec.dot(axis)
+
+
+def rotation_to_normal(normal0, target, axis=None):
+    """normal0 を target の向きへ揃える回転を (axis, angle) で返す。
+
+    姿勢を直接指定するスナップでも、結果を常に (軸, 角度) に還元しておくと、
+    確定後のリドゥもヘッダ表示もスナップ解除後の継続も、通常の回転と
+    まったく同じ経路に乗る。スナップを特別な状態にしないための逆算。
+
+    平面の法線は符号が反転しても同じ平面を表すので、常に ±target のうち
+    近い方を採る。そうしないと、ほぼ揃っているのに 180 度回る事故が起きる。
+
+    axis を渡すとその軸まわりの回転だけに制限し、target に最も近づく角度を
+    返す（軸拘束中のスナップ）。決められなければ None。
+    """
+    n0 = normal0.normalized()
+    t = target.normalized()
+    if t.dot(n0) < 0.0:
+        t = -t
+
+    if axis is None:
+        ax, ang = n0.rotation_difference(t).to_axis_angle()
+        if ax.length_squared < 1e-16:
+            return None
+        return ax.normalized(), ang
+
+    ax = axis.normalized()
+    p0 = _project_out(n0, ax)
+    pt = _project_out(t, ax)
+    if p0.length_squared < 1e-12 or pt.length_squared < 1e-12:
+        return None            # 軸と法線がほぼ平行＝この軸では近づけられない
+    p0.normalize()
+    pt.normalize()
+    ang = math.atan2(ax.dot(p0.cross(pt)), p0.dot(pt))
+    # ±pi ずれても同じ平面なので、回転量が小さい方を選ぶ
+    if ang > math.pi / 2:
+        ang -= math.pi
+    elif ang < -math.pi / 2:
+        ang += math.pi
+    return ax, ang

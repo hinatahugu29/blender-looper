@@ -1,0 +1,167 @@
+"""apply_plane と姿勢→回転量の逆算のヘッドレステスト。
+
+blender --background --factory-startup --python tests/test_align_core.py
+"""
+import os, sys, math
+import bpy, bmesh
+from mathutils import Vector, Matrix
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+from Looper import core                                        # noqa: E402
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from test_core import make_cone, loop_at_z, check, FAILS, report  # noqa: E402
+
+
+def planarity(verts):
+    pts = [v.co.copy() for v in verts]
+    n = core.fit_plane_normal(pts)
+    c = sum(pts, Vector()) / len(pts)
+    return max(abs((p - c).dot(n)) for p in pts)
+
+
+# -- 逆算 ------------------------------------------------------------------
+
+def test_rotation_to_normal_free():
+    print("[test] 自由回転の逆算が目標法線に一致する")
+    n0 = Vector((0.0, 0.0, 1.0))
+    for target in (Vector((0.3, -0.2, 1.0)), Vector((1.0, 0.0, 0.2)),
+                   Vector((0.0, 0.9, 0.4))):
+        ax, ang = core.rotation_to_normal(n0, target)
+        got = Matrix.Rotation(ang, 4, ax).to_3x3() @ n0
+        err = (got - target.normalized()).length
+        check(err < 1e-5, f"逆算した回転で法線が一致 (誤差 {err:.3e})")
+
+
+def test_rotation_to_normal_sign():
+    print("[test] 法線の符号反転で 180 度回らない")
+    n0 = Vector((0.0, 0.0, 1.0))
+    ax, ang = core.rotation_to_normal(n0, Vector((0.0, 0.05, -1.0)))
+    check(abs(ang) < math.radians(10.0),
+          f"-Z 寄りの目標でも小さな回転 ({math.degrees(ang):.2f}°)")
+
+
+def test_rotation_to_normal_constrained():
+    print("[test] 軸拘束付きの逆算")
+    n0 = Vector((0.0, 0.0, 1.0))
+    axis = Vector((1.0, 0.0, 0.0))
+    # X 軸まわりなら YZ 平面内の目標にはぴたりと届く
+    target = Vector((0.0, 1.0, 1.0))
+    ax, ang = core.rotation_to_normal(n0, target, axis=axis)
+    got = Matrix.Rotation(ang, 4, ax).to_3x3() @ n0
+    check((got - target.normalized()).length < 1e-6,
+          "拘束軸上の目標には厳密に一致")
+
+    # 軸に平行な目標は原理的に到達不能 → None
+    check(core.rotation_to_normal(n0, axis, axis=axis) is None,
+          "到達不能な目標は None を返す")
+
+    # 到達不能でない範囲では「最も近づく角度」になっているか（数値的に確認）
+    target = Vector((0.6, 0.6, 0.5))
+    ax, ang = core.rotation_to_normal(n0, target, axis=axis)
+    t = target.normalized()
+
+    def dist(a):
+        return ((Matrix.Rotation(a, 4, ax).to_3x3() @ n0) - t).length
+
+    best = min((dist(ang + d) for d in
+                (-0.2, -0.05, -0.01, 0.0, 0.01, 0.05, 0.2)))
+    check(abs(dist(ang) - best) < 1e-9, "拘束下で最も近い角度を選んでいる")
+
+
+def test_snap_angle():
+    print("[test] 角度の刻み")
+    step = math.radians(5.0)
+    for deg, want in ((0.0, 0.0), (2.4, 0.0), (2.6, 5.0), (47.0, 45.0),
+                      (-47.0, -45.0), (183.0, 185.0)):
+        got = math.degrees(core.snap_angle(math.radians(deg), step))
+        check(abs(got - want) < 1e-9, f"{deg}° → {got:.0f}° (期待 {want:.0f}°)")
+
+
+# -- apply_plane -----------------------------------------------------------
+
+def test_apply_plane_matches_matrix():
+    print("[test] apply_plane と apply_matrix(PLANE) が一致する")
+    bm = make_cone()
+    loop = loop_at_z(bm, 0.0)
+    ang = math.radians(20.0)
+    axis = Vector((1.0, 0.0, 0.0))
+
+    c1 = core.RailCache(loop)
+    mat = core.rotation_matrix_about(axis, ang, c1.pivot)
+    c1.apply_matrix(mat, mode='PLANE')
+    via_matrix = [v.co.copy() for v in loop]
+    c1.restore()
+
+    c2 = core.RailCache(loop)
+    normal = (mat.to_3x3() @ c2.normal0)
+    c2.apply_plane(normal, mat @ c2.pivot)
+    via_plane = [v.co.copy() for v in loop]
+    c2.restore()
+
+    err = max((a - b).length for a, b in zip(via_matrix, via_plane))
+    check(err < 1e-12, f"両経路の結果が一致 (差 {err:.3e})")
+
+
+def test_apply_plane_aligns_to_target():
+    print("[test] 目標法線を渡すとその向きに揃う")
+    bm = make_cone()
+    loop = loop_at_z(bm, 0.0)
+    cache = core.RailCache(loop)
+
+    target = Vector((0.0, 0.35, 1.0)).normalized()
+    clamped = cache.apply_plane(target, cache.pivot)
+    check(clamped == 0, f"全頂点がレールと交差 (クランプ {clamped})")
+
+    flat = planarity(loop)
+    check(flat < 1e-6, f"結果が平面に乗っている (最大ズレ {flat:.3e})")
+
+    got = core.fit_plane_normal([v.co.copy() for v in loop])
+    if got.dot(target) < 0:
+        got = -got
+    check((got - target).length < 1e-5,
+          f"法線が目標と一致 (誤差 {(got - target).length:.3e})")
+    cache.restore()
+
+
+def test_apply_plane_reports_clamping():
+    print("[test] 届かない平面はクランプとして報告される")
+    bm = make_cone()
+    loop = loop_at_z(bm, 0.0)
+    cache = core.RailCache(loop)
+    # レールからはるか遠くの平面 → 交差しようがない
+    far = cache.pivot + Vector((0.0, 0.0, 100.0))
+    clamped = cache.apply_plane(Vector((0.0, 0.0, 1.0)), far)
+    check(clamped == len(loop), f"全頂点がクランプ扱い ({clamped}/{len(loop)})")
+    check(cache.last_clamped == clamped, "last_clamped に記録される")
+    cache.restore()
+
+
+def test_align_roundtrip():
+    print("[test] 逆算した回転で apply_matrix しても同じ姿勢になる")
+    bm = make_cone()
+    loop = loop_at_z(bm, 0.0)
+    cache = core.RailCache(loop)
+    target = Vector((0.2, 0.3, 1.0)).normalized()
+
+    ax, ang = core.rotation_to_normal(cache.normal0, target)
+    mat = core.rotation_matrix_about(ax, ang, cache.pivot)
+    cache.apply_matrix(mat, mode='PLANE')
+    got = core.fit_plane_normal([v.co.copy() for v in loop])
+    if got.dot(target) < 0:
+        got = -got
+    check((got - target).length < 1e-5,
+          f"逆算 → 行列 → 射影で目標姿勢 (誤差 {(got - target).length:.3e})")
+    cache.restore()
+
+
+def run_all():
+    for fn in (test_rotation_to_normal_free, test_rotation_to_normal_sign,
+               test_rotation_to_normal_constrained, test_snap_angle,
+               test_apply_plane_matches_matrix, test_apply_plane_aligns_to_target,
+               test_apply_plane_reports_clamping, test_align_roundtrip):
+        fn()
+
+
+if __name__ == "__main__":
+    run_all()
+    report()
