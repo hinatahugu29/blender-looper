@@ -3,9 +3,9 @@
 bl_info = {
     "name": "Looper",
     "author": "hinatahugu29",
-    "version": (0, 2, 0),
+    "version": (0, 3, 0),
     "blender": (4, 2, 0),
-    "location": "Edit Mode > Alt+R / Ctrl+E / 右クリックメニュー",
+    "location": "Edit Mode > Nパネル(Looper) / Alt+R / Ctrl+E / 右クリック",
     "description": "メッシュの形状を保ったままループ辺をスライドさせる",
     "doc_url": "https://github.com/hinatahugu29/blender-looper",
     "tracker_url": "https://github.com/hinatahugu29/blender-looper/issues",
@@ -16,6 +16,7 @@ import bpy
 
 from . import ops
 from . import modal
+from . import panels
 
 addon_keymaps = []
 
@@ -40,8 +41,9 @@ def _context_menu_func(self, context):
 
 
 def register():
-    for cls in ops.classes + modal.classes:
+    for cls in ops.classes + modal.classes + panels.classes:
         bpy.utils.register_class(cls)
+    panels.register_props()
 
     bpy.types.VIEW3D_MT_edit_mesh_edges.append(_menu_func)
     bpy.types.VIEW3D_MT_edit_mesh_context_menu.append(_context_menu_func)
@@ -62,5 +64,6 @@ def unregister():
     bpy.types.VIEW3D_MT_edit_mesh_context_menu.remove(_context_menu_func)
     bpy.types.VIEW3D_MT_edit_mesh_edges.remove(_menu_func)
 
-    for cls in reversed(ops.classes + modal.classes):
+    panels.unregister_props()
+    for cls in reversed(ops.classes + modal.classes + panels.classes):
         bpy.utils.unregister_class(cls)

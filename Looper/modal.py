@@ -56,9 +56,17 @@ class MESH_OT_looper_rotate(bpy.types.Operator):
                 and context.space_data.type == 'VIEW_3D')
 
     # -- 内部 -------------------------------------------------------------
-    def _screen_angle(self, mx, my):
+    def _screen_angle(self, event):
+        """3Dビュー領域を基準にした、ピボットまわりのマウス角度。
+
+        Nパネルのボタンから起動した場合、マウスは UI 領域の上にあって
+        event.mouse_region_* が 3D ビュー基準にならないので、
+        ウィンドウ座標から 3D ビュー領域の原点を引いて求める。
+        """
         if self.pivot_2d is None:
             return 0.0
+        mx = event.mouse_x - self.region.x
+        my = event.mouse_y - self.region.y
         return math.atan2(my - self.pivot_2d.y, mx - self.pivot_2d.x)
 
     def _local_axis(self):
@@ -120,7 +128,9 @@ class MESH_OT_looper_rotate(bpy.types.Operator):
             self.report({'INFO'}, "平面をフィットできないため最近点モード")
 
         self.rv3d = context.space_data.region_3d
-        self.region = context.region
+        self.region = next(
+            (r for r in context.area.regions if r.type == "WINDOW"),
+            context.region)
         self.mat3_inv = ob.matrix_world.to_3x3().inverted()
 
         pivot_world = ob.matrix_world @ self.cache.pivot
@@ -130,8 +140,7 @@ class MESH_OT_looper_rotate(bpy.types.Operator):
         self.angle = 0.0
         self.axis_lock = None
         self.num_buf = ""
-        self.last_raw = self._screen_angle(event.mouse_region_x,
-                                           event.mouse_region_y)
+        self.last_raw = self._screen_angle(event)
 
         context.window.cursor_modal_set('CROSSHAIR')
         self._apply(context)
@@ -142,7 +151,7 @@ class MESH_OT_looper_rotate(bpy.types.Operator):
         ev, val = event.type, event.value
 
         if ev == 'MOUSEMOVE':
-            raw = self._screen_angle(event.mouse_region_x, event.mouse_region_y)
+            raw = self._screen_angle(event)
             if not self.num_buf:
                 d = raw - self.last_raw
                 # -pi..pi へ巻き戻す
