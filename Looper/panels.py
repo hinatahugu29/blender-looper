@@ -14,6 +14,10 @@ class LooperSettings(bpy.types.PropertyGroup):
         description=ops.EXTEND_DESC,
         default=True,
     )
+    snap_type: EnumProperty(
+        name="Snap", items=ops.SNAP_ITEMS, default='INCREMENT',
+        description="Rotate 中に Ctrl を押している間のスナップ先",
+    )
 
 
 class VIEW3D_PT_looper(bpy.types.Panel):
@@ -37,6 +41,9 @@ class VIEW3D_PT_looper(bpy.types.Panel):
         box = col.box()
         box.prop(st, "mode", text="")
         box.prop(st, "extend")
+        row = box.row(align=True)
+        row.label(text="Ctrl:")
+        row.prop(st, "snap_type", expand=True)
 
         # -- 動かす --------------------------------------------------------
         col = layout.column(align=True)
@@ -47,6 +54,7 @@ class VIEW3D_PT_looper(bpy.types.Panel):
                           text="Rotate Loop", icon='FILE_REFRESH')
         op.mode = st.mode
         op.extend = st.extend
+        op.snap_type = st.snap_type
 
         # -- 揃える --------------------------------------------------------
         col = layout.column(align=True)
@@ -67,7 +75,7 @@ class VIEW3D_PT_looper(bpy.types.Panel):
         box = layout.box()
         box.scale_y = 0.8
         for line in ("Rotate は Alt+R でも起動します",
-                     "X/Y/Z 軸拘束  Shift 精密",
+                     "X/Y/Z 軸拘束  Ctrl スナップ  Shift 精密",
                      "P モード切替  E 越境切替"):
             box.label(text=line)
 

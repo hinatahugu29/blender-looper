@@ -45,6 +45,10 @@ class MESH_OT_looper_rotate(bpy.types.Operator):
         description="隣のループを越えてレールを辿る",
         default=True,
     )
+    snap_type: bpy.props.EnumProperty(
+        name="Snap", items=ops.SNAP_ITEMS, default='INCREMENT',
+        description="Ctrl を押している間のスナップ先",
+    )
     angle: bpy.props.FloatProperty(
         name="Angle", subtype='ANGLE', default=0.0,
     )
@@ -85,6 +89,34 @@ class MESH_OT_looper_rotate(bpy.types.Operator):
             return Vector((0.0, 0.0, 1.0))
         return local.normalized()
 
+    def _pick_face_normal(self, event):
+        """カーソル下の面の法線（ローカル空間）。外していれば None。"""
+        if self.bvh is None:
+            return None
+        co = (event.mouse_x - self.region.x, event.mouse_y - self.region.y)
+        origin = view3d_utils.region_2d_to_origin_3d(self.region, self.rv3d, co)
+        direction = view3d_utils.region_2d_to_vector_3d(self.region, self.rv3d, co)
+        # レイをローカル空間へ持ち込む。ここに留まる限り、法線を
+        # 逆転置行列で変換する必要がない（非一様スケールでも壊れない）
+        o = self.mw_inv @ origin
+        d = (self.mw_inv.to_3x3() @ direction).normalized()
+        hit = self.bvh.ray_cast(o, d)
+        return hit[1] if hit and hit[1] is not None else None
+
+    def _update_face_snap(self, event):
+        """カーソル下の面へ揃える回転を求めて face_rot に入れる。
+
+        姿勢を直接当てるのではなく (軸, 角度) へ逆算して持つので、
+        確定後のリドゥも通常の回転とまったく同じ経路に乗る。
+        """
+        normal = self._pick_face_normal(event)
+        if normal is None or self.cache.normal0 is None:
+            return
+        lock = self._local_axis() if self.axis_lock else None
+        res = core.rotation_to_normal(self.cache.normal0, normal, axis=lock)
+        if res is not None:
+            self.face_rot = res
+
     def _snap_step(self):
         return SNAP_STEP_FINE if self.snap_fine else SNAP_STEP
 
@@ -99,11 +131,20 @@ class MESH_OT_looper_rotate(bpy.types.Operator):
             return core.snap_angle(self.angle, self._snap_step())
         return self.angle
 
+    @property
+    def _face_snapping(self):
+        return self.snapping and self.snap_type == 'FACE'
+
+    def _current_rotation(self):
+        """今フレーム適用する (ローカル軸, 角度)。"""
+        if self._face_snapping and self.face_rot is not None:
+            return self.face_rot
+        return self._local_axis(), self._effective_angle()
+
     def _apply(self, context):
-        axis = self._local_axis()
+        axis, angle = self._current_rotation()
         self.axis_local = axis
-        mat = core.rotation_matrix_about(axis, self._effective_angle(),
-                                         self.cache.pivot)
+        mat = core.rotation_matrix_about(axis, angle, self.cache.pivot)
         self.cache.apply_matrix(mat, extend=self.extend, mode=self.mode)
         self.bm.normal_update()
         bmesh.update_edit_mesh(self.me, loop_triangles=False, destructive=False)
@@ -113,10 +154,15 @@ class MESH_OT_looper_rotate(bpy.types.Operator):
         if self.num_buf:
             a = f"角度: [{self.num_buf}]"
         else:
-            a = f"角度: {math.degrees(self._effective_angle()):.2f}°"
+            a = f"角度: {math.degrees(self._current_rotation()[1]):.2f}°"
         axis = self.axis_lock if self.axis_lock else "ビュー"
 
-        if self.snapping:
+        if self._face_snapping:
+            state = "面に整列" if self.face_rot else "面を指してください"
+            head = (f"[スナップ｜{state}]  {a}   "
+                    f"軸拘束: {self.axis_lock or 'なし'}   "
+                    f"[Ctrl を離すと通常の回転へ]")
+        elif self.snapping:
             # スナップ中は状態が変わったことを一目で分かるようにし、
             # 常時ヒントは引っ込める（項目数を増やさない）
             step = math.degrees(self._snap_step())
@@ -176,6 +222,9 @@ class MESH_OT_looper_rotate(bpy.types.Operator):
         self.num_buf = ""
         self.snapping = False
         self.snap_fine = False
+        self.face_rot = None
+        self.mw_inv = ob.matrix_world.inverted()
+        self.bvh = core.build_snap_bvh(self.bm, sel)
         self.last_raw = self._screen_angle(event)
 
         context.window.cursor_modal_set('CROSSHAIR')
@@ -191,13 +240,24 @@ class MESH_OT_looper_rotate(bpy.types.Operator):
         ctrl, shift = event.ctrl, event.shift
         if ctrl != self.snapping or (ctrl and shift != self.snap_fine):
             self.snapping, self.snap_fine = ctrl, shift
+            if not ctrl:
+                # Blender 標準のスナップと同じく、離したら素の回転に戻る
+                self.face_rot = None
+            elif self.snap_type == 'FACE':
+                self._update_face_snap(event)
+            # 面スナップ中はマウスが回転を駆動しないので、基準を取り直さないと
+            # Ctrl を離した瞬間にその間の移動量が一気に効いてループが飛ぶ
+            self.last_raw = self._screen_angle(event)
             self._apply(context)
         else:
             self.snap_fine = shift
 
         if ev == 'MOUSEMOVE':
             raw = self._screen_angle(event)
-            if not self.num_buf:
+            if self._face_snapping:
+                self._update_face_snap(event)   # マウスは面を指す役に回る
+                self._apply(context)
+            elif not self.num_buf:
                 d = raw - self.last_raw
                 # -pi..pi へ巻き戻す
                 d = (d + math.pi) % (2 * math.pi) - math.pi
@@ -229,6 +289,10 @@ class MESH_OT_looper_rotate(bpy.types.Operator):
 
             if ev in {'X', 'Y', 'Z'}:
                 self.axis_lock = None if self.axis_lock == ev else ev
+                if self._face_snapping:
+                    # 拘束が変われば「その軸で最も近づく角度」も変わる
+                    self.face_rot = None
+                    self._update_face_snap(event)
                 self._apply(context)
                 return {'RUNNING_MODAL'}
 
@@ -248,10 +312,12 @@ class MESH_OT_looper_rotate(bpy.types.Operator):
                 return {'RUNNING_MODAL'}
 
             if ev in {'LEFTMOUSE', 'RET', 'NUMPAD_ENTER'}:
-                # 確定した角度を実値として残す。そうしないと F9 のリドゥが
+                # 確定した姿勢を実値として残す。そうしないと F9 のリドゥが
                 # スナップ前の生の角度で再計算してしまう。
-                self.angle = self._effective_angle()
+                axis, angle = self._current_rotation()
+                self.axis_local, self.angle = axis, angle
                 self.snapping = False
+                self.face_rot = None
                 self._finish(context)
                 return {'FINISHED'}
 

@@ -18,6 +18,7 @@ extend=True のときは、a / b の先へエッジリングを辿って折れ�
 import math
 
 from mathutils import Vector
+from mathutils.bvhtree import BVHTree
 
 MAX_WALK = 256
 
@@ -463,3 +464,22 @@ def rotation_to_normal(normal0, target, axis=None):
     elif ang < -math.pi / 2:
         ang += math.pi
     return ax, ang
+
+
+def build_snap_bvh(bm, moving):
+    """面スナップ用の BVH を作る。moving に触れる面は除外する。
+
+    自分自身に揃えようとすると参照が循環するし、その面は操作中に動いて
+    しまう。除外したあとに残る面はどれも動かないので、座標を一度写し取れば
+    操作中ずっと使い回せる（毎フレーム再構築は不要）。
+
+    戻り値: BVHTree / 対象の面が1枚も無ければ None
+    """
+    moving = set(moving)
+    bm.verts.index_update()
+    coords = [v.co.copy() for v in bm.verts]
+    polys = [[v.index for v in f.verts] for f in bm.faces
+             if not f.hide and not moving.intersection(f.verts)]
+    if not polys:
+        return None
+    return BVHTree.FromPolygons(coords, polys, all_triangles=False)

@@ -17,6 +17,16 @@ MODE_ITEMS = [
 
 EXTEND_DESC = "隣のループを越えてレールを辿る。OFF なら直近の1区間に制限"
 
+# Ctrl 押下中に何へスナップするか。Blender の磁石アイコンと同じ考え方で、
+# 「Ctrl = スナップ」は固定し、スナップ先だけを設定で切り替える。
+SNAP_ITEMS = [
+    ('INCREMENT', "Increment",
+     "角度を一定の刻みに丸める（既定 5°、Shift 併用で 1°）"),
+    ('FACE', "Face",
+     "カーソルの下にある面の法線にループを揃える。"
+     "マウスは面を指すのに使うので、回転の積算は止まる"),
+]
+
 
 def poll_edit_mesh(context):
     ob = context.object

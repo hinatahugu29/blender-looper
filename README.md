@@ -87,6 +87,7 @@ AMD の Radeon Software でも `Alt+R` が Radeon オーバーレイの既定キ
 ```
 blender --background --factory-startup --python tests/test_core.py
 blender --background --factory-startup --python tests/test_modal_core.py
+blender --background --factory-startup --python tests/test_align_core.py
 ```
 
 `Looper/core.py` は `bpy` に依存しないので（`bmesh` / `mathutils` のみ）

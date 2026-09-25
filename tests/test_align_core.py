@@ -154,11 +154,114 @@ def test_align_roundtrip():
     cache.restore()
 
 
+# -- 面スナップ経路 --------------------------------------------------------
+
+def test_snap_bvh_excludes_moving_faces():
+    print("[test] BVH が動かす面を除外している")
+    bm = make_cone()
+    loop = loop_at_z(bm, 0.0)
+    bvh = core.build_snap_bvh(bm, loop)
+    check(bvh is not None, "BVH が作れる")
+
+    moving = set(loop)
+    excluded = [f for f in bm.faces if moving.intersection(f.verts)]
+    check(len(excluded) > 0, f"除外対象の面が存在する ({len(excluded)} 枚)")
+
+    # 除外した面の重心へ、その面の法線方向から撃つ → 当たってはいけない
+    hits = 0
+    for f in excluded:
+        c = f.calc_center_median()
+        if bvh.ray_cast(c + f.normal * 0.5, -f.normal, 0.45)[1] is not None:
+            hits += 1
+    check(hits == 0, f"動かす面には当たらない (ヒット {hits} 件)")
+
+    # 動かさない面（上下のキャップ）にはちゃんと当たる
+    keep = [f for f in bm.faces if not moving.intersection(f.verts)]
+    c = keep[0].calc_center_median()
+    n = keep[0].normal
+    check(bvh.ray_cast(c + n * 0.5, -n, 1.0)[1] is not None,
+          "動かさない面には当たる")
+
+
+def test_face_snap_pipeline():
+    print("[test] 面の法線を拾う → 逆算 → 射影 で面と平行になる")
+    bm = make_cone()
+    loop = loop_at_z(bm, 0.0)
+    bvh = core.build_snap_bvh(bm, loop)
+    cache = core.RailCache(loop)
+
+    # 側面の一枚を「カーソル下の面」に見立てて法線を拾う
+    moving = set(loop)
+    side = next(f for f in bm.faces
+                if not moving.intersection(f.verts) and abs(f.normal.z) < 0.9)
+    c = side.calc_center_median()
+    hit = bvh.ray_cast(c + side.normal * 0.5, -side.normal, 1.0)
+    picked = hit[1]
+    check(picked is not None, "レイキャストで法線を拾えた")
+
+    res = core.rotation_to_normal(cache.normal0, picked)
+    check(res is not None, "法線から回転量を逆算できた")
+
+    # 円錐側面の法線はほぼ水平で、そこへ揃えると目標平面がレールとほぼ平行に
+    # なる＝原理的に交差しない。結果が平面に乗らないこと自体は正しいので、
+    # ここで守りたいのは「黙って間違わない」こと。
+    ax, ang = res
+    cache.apply_matrix(core.rotation_matrix_about(ax, ang, cache.pivot),
+                       mode='PLANE')
+    got = core.fit_plane_normal([v.co.copy() for v in loop])
+    if got.dot(picked) < 0:
+        got = -got
+    aligned = (got - picked.normalized()).length < 1e-4
+    check(aligned or cache.last_clamped > 0,
+          f"揃うか、届かないならクランプを報告する "
+          f"(揃った={aligned} クランプ={cache.last_clamped})")
+    cache.restore()
+
+    # 届く範囲の目標なら、拾った法線から厳密に揃うこと
+    target = cache.normal0.lerp(picked.normalized()
+                                if picked.dot(cache.normal0) > 0
+                                else -picked.normalized(), 0.3).normalized()
+    ax, ang = core.rotation_to_normal(cache.normal0, target)
+    cache.apply_matrix(core.rotation_matrix_about(ax, ang, cache.pivot),
+                       mode='PLANE')
+    check(cache.last_clamped == 0,
+          f"届く範囲ではクランプしない ({cache.last_clamped})")
+    got = core.fit_plane_normal([v.co.copy() for v in loop])
+    if got.dot(target) < 0:
+        got = -got
+    err = (got - target).length
+    check(err < 1e-4, f"拾った法線の方向へ厳密に揃う (誤差 {err:.3e})")
+    cache.restore()
+
+
+def test_face_snap_constrained():
+    print("[test] 軸拘束中の面スナップは拘束を破らない")
+    bm = make_cone()
+    loop = loop_at_z(bm, 0.0)
+    cache = core.RailCache(loop)
+    axis = Vector((1.0, 0.0, 0.0))
+    target = Vector((0.4, 0.5, 0.8))
+
+    res = core.rotation_to_normal(cache.normal0, target, axis=axis)
+    check(res is not None, "拘束付きでも回転量が求まる")
+    ax, ang = res
+    check((ax - axis).length < 1e-9, "返る軸が拘束軸そのもの")
+
+    mat = core.rotation_matrix_about(ax, ang, cache.pivot)
+    cache.apply_matrix(mat, mode='PLANE')
+    got = core.fit_plane_normal([v.co.copy() for v in loop])
+    # X 軸まわりの回転なので、法線の X 成分は元のまま（＝0）のはず
+    check(abs(got.x) < 1e-5, f"拘束軸成分が変化していない (x={got.x:.3e})")
+    cache.restore()
+
+
 def run_all():
     for fn in (test_rotation_to_normal_free, test_rotation_to_normal_sign,
                test_rotation_to_normal_constrained, test_snap_angle,
                test_apply_plane_matches_matrix, test_apply_plane_aligns_to_target,
-               test_apply_plane_reports_clamping, test_align_roundtrip):
+               test_apply_plane_reports_clamping, test_align_roundtrip,
+               test_snap_bvh_excludes_moving_faces, test_face_snap_pipeline,
+               test_face_snap_constrained):
         fn()
 
 
