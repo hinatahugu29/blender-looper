@@ -98,8 +98,8 @@ class MESH_OT_looper_rotate(bpy.types.Operator):
             return Vector((0.0, 0.0, 1.0))
         return local.normalized()
 
-    def _pick_face_normal(self, event):
-        """カーソル下の面の法線（ローカル空間）。外していれば None。"""
+    def _raycast(self, event):
+        """カーソル下の (ヒット座標, 面の法線, 面) をローカル空間で返す。"""
         if self.bvh is None:
             return None
         co = (event.mouse_x - self.region.x, event.mouse_y - self.region.y)
@@ -109,16 +109,37 @@ class MESH_OT_looper_rotate(bpy.types.Operator):
         # 逆転置行列で変換する必要がない（非一様スケールでも壊れない）
         o = self.mw_inv @ origin
         d = (self.mw_inv.to_3x3() @ direction).normalized()
-        hit = self.bvh.ray_cast(o, d)
-        return hit[1] if hit and hit[1] is not None else None
+        loc, nrm, idx, _dist = self.bvh.ray_cast(o, d)
+        if nrm is None or idx is None or idx >= len(self.snap_faces):
+            return None
+        return loc, nrm, self.snap_faces[idx]
+
+    def _pick_target_normal(self, event):
+        """スナップ先の法線（ローカル空間）。外していれば None。"""
+        self.snap_info = ""
+        hit = self._raycast(event)
+        if hit is None:
+            return None
+        loc, nrm, face = hit
+        if self.snap_type == 'FACE':
+            self.snap_info = "面に整列"
+            return nrm
+        # LOOP: 指した辺のエッジループに平面をフィットする
+        res = core.loop_plane_at(face, loc, blocked=self.moving)
+        if res is None:
+            self.snap_info = "ループを特定できません"
+            return None
+        normal, _center, n = res
+        self.snap_info = f"ループに整列 ({n} 頂点)"
+        return normal
 
     def _update_face_snap(self, event):
-        """カーソル下の面へ揃える回転を求めて face_rot に入れる。
+        """カーソル下のスナップ先へ揃える回転を求めて face_rot に入れる。
 
         姿勢を直接当てるのではなく (軸, 角度) へ逆算して持つので、
         確定後のリドゥも通常の回転とまったく同じ経路に乗る。
         """
-        normal = self._pick_face_normal(event)
+        normal = self._pick_target_normal(event)
         if normal is None or self.cache.normal0 is None:
             return
         lock = self._local_axis() if self.axis_lock else None
@@ -192,7 +213,8 @@ class MESH_OT_looper_rotate(bpy.types.Operator):
 
     @property
     def _face_snapping(self):
-        return self.snapping and self.snap_type == 'FACE'
+        """カーソルでスナップ先を指す種別か（＝マウスが回転を駆動しない）。"""
+        return self.snapping and self.snap_type in {'FACE', 'LOOP'}
 
     def _current_rotation(self):
         """今フレーム適用する (ローカル軸, 角度)。"""
@@ -225,7 +247,8 @@ class MESH_OT_looper_rotate(bpy.types.Operator):
             a += f"   絶対: {math.degrees(abs_a):+.2f}° ({ref}平面から)"
 
         if self._face_snapping:
-            state = "面に整列" if self.face_rot else "面を指してください"
+            what = "面" if self.snap_type == 'FACE' else "ループ"
+            state = self.snap_info or f"{what}を指してください"
             head = (f"[スナップ｜{state}]  {a}   "
                     f"軸拘束: {self.axis_lock or 'なし'}   "
                     f"[Ctrl を離すと通常の回転へ]")
@@ -291,11 +314,14 @@ class MESH_OT_looper_rotate(bpy.types.Operator):
         self.snapping = False
         self.snap_fine = False
         self.face_rot = None
+        self.snap_info = ""
         self.num_absolute = True
+        self.moving = set(sel)
         self.mw_inv = ob.matrix_world.inverted()
         # 法線をローカル→ワールドへ移すのは逆転置行列
         self.mat3_nrm = ob.matrix_world.to_3x3().inverted().transposed()
-        self.bvh = core.build_snap_bvh(self.bm, sel)
+        built = core.build_snap_bvh(self.bm, sel)
+        self.bvh, self.snap_faces = built if built else (None, [])
         self.last_raw = self._screen_angle(event)
 
         context.window.cursor_modal_set('CROSSHAIR')
@@ -314,6 +340,7 @@ class MESH_OT_looper_rotate(bpy.types.Operator):
             if not ctrl:
                 # Blender 標準のスナップと同じく、離したら素の回転に戻る
                 self.face_rot = None
+                self.snap_info = ""
             elif self.snap_type == 'FACE':
                 self._update_face_snap(event)
             # 面スナップ中はマウスが回転を駆動しないので、基準を取り直さないと

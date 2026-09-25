@@ -473,16 +473,18 @@ def build_snap_bvh(bm, moving):
     しまう。除外したあとに残る面はどれも動かないので、座標を一度写し取れば
     操作中ずっと使い回せる（毎フレーム再構築は不要）。
 
-    戻り値: BVHTree / 対象の面が1枚も無ければ None
+    戻り値: (BVHTree, 面のリスト) / 対象の面が1枚も無ければ None
+    面のリストは ray_cast が返すインデックスから元の面を引くためのもの。
     """
     moving = set(moving)
     bm.verts.index_update()
     coords = [v.co.copy() for v in bm.verts]
-    polys = [[v.index for v in f.verts] for f in bm.faces
+    faces = [f for f in bm.faces
              if not f.hide and not moving.intersection(f.verts)]
-    if not polys:
+    if not faces:
         return None
-    return BVHTree.FromPolygons(coords, polys, all_triangles=False)
+    polys = [[v.index for v in f.verts] for f in faces]
+    return BVHTree.FromPolygons(coords, polys, all_triangles=False), faces
 
 
 def absolute_plane_angle(normal, axis, reference):
@@ -499,3 +501,63 @@ def absolute_plane_angle(normal, axis, reference):
     """
     res = rotation_to_normal(reference, normal, axis=axis)
     return None if res is None else res[1]
+
+
+def walk_edge_loop(edge, limit=MAX_WALK):
+    """edge を含むエッジループ上の頂点を返す。
+
+    valence 4 の頂点で「面を共有しない向かい側の辺」へ進む＝レール延長に
+    使っている _ring_next と同じ規則。あちらはレール方向のループを辿り、
+    こちらは狙ったループそのものを辿る、という違いだけ。
+
+    平面フィットは頂点順序を必要としないので、順序は保証しない。
+    """
+    verts = {edge.verts[0], edge.verts[1]}
+    seen = {edge}
+    for i in (0, 1):
+        cur_e, cur_v = edge, edge.verts[i]
+        for _ in range(limit):
+            nxt_e = _ring_next(cur_v, cur_e)
+            if nxt_e is None or nxt_e in seen:
+                break
+            seen.add(nxt_e)
+            cur_v = _other(nxt_e, cur_v)
+            verts.add(cur_v)
+            cur_e = nxt_e
+    return list(verts)
+
+
+def closest_edge_in_face(face, co):
+    """face の辺のうち co に最も近いものを返す。"""
+    best, best_d = None, float('inf')
+    for e in face.edges:
+        p = _closest_on_polyline([e.verts[0].co, e.verts[1].co], co)
+        d = (co - p).length_squared
+        if d < best_d:
+            best_d, best = d, e
+    return best
+
+
+def loop_plane_at(face, co, blocked=()):
+    """face 上の co に最も近い辺のエッジループに平面をフィットする。
+
+    blocked（＝動かす頂点）がループに含まれていたら None を返す。
+    動いているループに揃えようとすると参照が循環する。
+
+    戻り値: (法線, ループ重心, 頂点数) / 求まらなければ None
+    """
+    edge = closest_edge_in_face(face, co)
+    if edge is None:
+        return None
+    verts = walk_edge_loop(edge)
+    if len(verts) < 3:
+        return None
+    blocked = set(blocked)
+    if blocked and blocked.intersection(verts):
+        return None
+    pts = [v.co.copy() for v in verts]
+    normal = fit_plane_normal(pts)
+    if normal is None:
+        return None
+    center = sum(pts, Vector()) / len(pts)
+    return normal, center, len(pts)

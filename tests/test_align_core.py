@@ -160,8 +160,9 @@ def test_snap_bvh_excludes_moving_faces():
     print("[test] BVH が動かす面を除外している")
     bm = make_cone()
     loop = loop_at_z(bm, 0.0)
-    bvh = core.build_snap_bvh(bm, loop)
-    check(bvh is not None, "BVH が作れる")
+    built = core.build_snap_bvh(bm, loop)
+    check(built is not None, "BVH が作れる")
+    bvh, faces = built
 
     moving = set(loop)
     excluded = [f for f in bm.faces if moving.intersection(f.verts)]
@@ -176,7 +177,7 @@ def test_snap_bvh_excludes_moving_faces():
     check(hits == 0, f"動かす面には当たらない (ヒット {hits} 件)")
 
     # 動かさない面（上下のキャップ）にはちゃんと当たる
-    keep = [f for f in bm.faces if not moving.intersection(f.verts)]
+    keep = faces
     c = keep[0].calc_center_median()
     n = keep[0].normal
     check(bvh.ray_cast(c + n * 0.5, -n, 1.0)[1] is not None,
@@ -187,7 +188,7 @@ def test_face_snap_pipeline():
     print("[test] 面の法線を拾う → 逆算 → 射影 で面と平行になる")
     bm = make_cone()
     loop = loop_at_z(bm, 0.0)
-    bvh = core.build_snap_bvh(bm, loop)
+    bvh, faces = core.build_snap_bvh(bm, loop)
     cache = core.RailCache(loop)
 
     # 側面の一枚を「カーソル下の面」に見立てて法線を拾う
@@ -328,6 +329,104 @@ def test_absolute_angle_undefined_on_parallel_axis():
           "基準と軸が同じ向きなら None")
 
 
+# -- ループ整列 ------------------------------------------------------------
+
+def test_walk_edge_loop_closed():
+    print("[test] 閉じたエッジループを一周たどれる")
+    bm = make_cone(segments=12, cuts=3)
+    loop = loop_at_z(bm, 0.0)
+    target = set(loop)
+    # ループ内の辺を1本選び、そこから一周できるか
+    edge = next(e for e in bm.edges
+                if e.verts[0] in target and e.verts[1] in target)
+    verts = core.walk_edge_loop(edge)
+    check(len(verts) == len(loop),
+          f"12 頂点すべてを辿れた ({len(verts)}/{len(loop)})")
+    check(set(verts) == target, "辿った頂点が元のループと一致")
+
+
+def test_loop_plane_at_finds_neighbour_loop():
+    print("[test] 隣のループの平面を拾える")
+    bm = make_cone(segments=12, cuts=3)
+    moving = loop_at_z(bm, 0.0)
+    moving_set = set(moving)
+
+    # 隣のループ（動かさない方）に接する面を1枚とって、その上の
+    # 「隣ループ寄り」の位置を指したことにする
+    neighbour = [v for v in bm.verts
+                 if v not in moving_set and abs(v.co.z - 0.5) < 1e-4]
+    check(len(neighbour) == 12, f"隣ループが 12 頂点ある ({len(neighbour)})")
+    nb_set = set(neighbour)
+
+    face = next(f for f in bm.faces
+                if not moving_set.intersection(f.verts)
+                and len(nb_set.intersection(f.verts)) >= 2)
+    co = sum((v.co for v in face.verts if v in nb_set), Vector()) / 2.0
+
+    res = core.loop_plane_at(face, co, blocked=moving_set)
+    check(res is not None, "ループ平面が求まった")
+    normal, center, n = res
+    check(n == 12, f"隣ループ 12 頂点を拾った ({n})")
+    check(abs(abs(normal.z) - 1.0) < 1e-5,
+          f"水平なループなので法線は Z ({normal.z:.6f})")
+    check(abs(center.z - 0.5) < 1e-4,
+          f"重心が隣ループの高さ ({center.z:.4f})")
+
+
+def test_loop_plane_rejects_moving_loop():
+    print("[test] 動かしているループは拾わない")
+    bm = make_cone(segments=12, cuts=3)
+    moving = loop_at_z(bm, 0.0)
+    moving_set = set(moving)
+    # 動かすループの辺を直接指しても、blocked なので拒否されるべき
+    edge = next(e for e in bm.edges
+                if e.verts[0] in moving_set and e.verts[1] in moving_set)
+    fake_face = edge.link_faces[0]
+    co = (edge.verts[0].co + edge.verts[1].co) / 2.0
+    check(core.loop_plane_at(fake_face, co, blocked=moving_set) is None,
+          "自分自身のループなら None（参照が循環する）")
+
+
+def test_loop_align_pipeline():
+    print("[test] ループの平面へ揃える")
+    bm = make_cone(segments=12, cuts=3)
+    moving = loop_at_z(bm, 0.0)
+    moving_set = set(moving)
+
+    # 隣のループをあらかじめ傾けておき、その傾きに合わせられるか見る
+    nb = [v for v in bm.verts
+          if v not in moving_set and abs(v.co.z - 0.5) < 1e-4]
+    nb_cache = core.RailCache(nb)
+    tilt = core.rotation_matrix_about(Vector((1.0, 0.0, 0.0)),
+                                      math.radians(15.0), nb_cache.pivot)
+    nb_cache.apply_matrix(tilt, mode='PLANE')
+    want = core.fit_plane_normal([v.co.copy() for v in nb])
+
+    cache = core.RailCache(moving)
+    face = next(f for f in bm.faces
+                if not moving_set.intersection(f.verts)
+                and len(set(nb).intersection(f.verts)) >= 2)
+    co = sum((v.co for v in face.verts if v in set(nb)), Vector()) / 2.0
+    res = core.loop_plane_at(face, co, blocked=moving_set)
+    check(res is not None, "傾けた隣ループの平面を拾えた")
+    picked = res[0]
+
+    ax, ang = core.rotation_to_normal(cache.normal0, picked)
+    cache.apply_matrix(core.rotation_matrix_about(ax, ang, cache.pivot),
+                       mode='PLANE')
+    check(cache.last_clamped == 0, f"クランプなし ({cache.last_clamped})")
+
+    got = core.fit_plane_normal([v.co.copy() for v in moving])
+    if got.dot(want) < 0:
+        got = -got
+    err = (got - want).length
+    check(err < 1e-4, f"隣ループと平行になった (誤差 {err:.3e})")
+    check(abs(math.degrees(core.absolute_plane_angle(
+        got, Vector((1.0, 0.0, 0.0)), Vector((0.0, 0.0, 1.0)))) - 15.0) < 1e-2,
+        "絶対角度でも 15° になっている")
+    cache.restore()
+
+
 def run_all():
     for fn in (test_rotation_to_normal_free, test_rotation_to_normal_sign,
                test_rotation_to_normal_constrained, test_snap_angle,
@@ -339,7 +438,11 @@ def run_all():
                test_absolute_angle_tracks_rotation,
                test_absolute_target_is_reached,
                test_absolute_angle_folds_to_quarter_turn,
-               test_absolute_angle_undefined_on_parallel_axis):
+               test_absolute_angle_undefined_on_parallel_axis,
+               test_walk_edge_loop_closed,
+               test_loop_plane_at_finds_neighbour_loop,
+               test_loop_plane_rejects_moving_loop,
+               test_loop_align_pipeline):
         fn()
 
 
