@@ -16,6 +16,11 @@ from mathutils import Vector
 from . import core
 from . import ops
 
+# Blender 標準のトランスフォームに合わせた刻み幅。
+# Shift は通常「精密モード」だが、Ctrl 併用時は細かい刻みに意味を振り替える。
+SNAP_STEP = math.radians(5.0)
+SNAP_STEP_FINE = math.radians(1.0)
+
 _NUM_CHARS = {
     'ZERO': '0', 'ONE': '1', 'TWO': '2', 'THREE': '3', 'FOUR': '4',
     'FIVE': '5', 'SIX': '6', 'SEVEN': '7', 'EIGHT': '8', 'NINE': '9',
@@ -80,10 +85,25 @@ class MESH_OT_looper_rotate(bpy.types.Operator):
             return Vector((0.0, 0.0, 1.0))
         return local.normalized()
 
+    def _snap_step(self):
+        return SNAP_STEP_FINE if self.snap_fine else SNAP_STEP
+
+    def _effective_angle(self):
+        """実際に適用する角度。
+
+        self.angle にはマウスが積算した生の角度を保持したまま、スナップ中だけ
+        ここで丸める。こうしておくと Ctrl を離した瞬間に生の角度へ滑らかに
+        戻り、スナップ解除で値が飛ばない。
+        """
+        if self.snapping and not self.num_buf:
+            return core.snap_angle(self.angle, self._snap_step())
+        return self.angle
+
     def _apply(self, context):
         axis = self._local_axis()
         self.axis_local = axis
-        mat = core.rotation_matrix_about(axis, self.angle, self.cache.pivot)
+        mat = core.rotation_matrix_about(axis, self._effective_angle(),
+                                         self.cache.pivot)
         self.cache.apply_matrix(mat, extend=self.extend, mode=self.mode)
         self.bm.normal_update()
         bmesh.update_edit_mesh(self.me, loop_triangles=False, destructive=False)
@@ -93,14 +113,27 @@ class MESH_OT_looper_rotate(bpy.types.Operator):
         if self.num_buf:
             a = f"角度: [{self.num_buf}]"
         else:
-            a = f"角度: {math.degrees(self.angle):.2f}°"
+            a = f"角度: {math.degrees(self._effective_angle()):.2f}°"
         axis = self.axis_lock if self.axis_lock else "ビュー"
-        ext = "ON" if self.extend else "OFF"
-        m = "平面断面" if self.mode == "PLANE" else "最近点"
-        context.area.header_text_set(
-            f"{a}   軸: {axis}   "
-            f"[X/Y/Z 拘束  Shift 精密  Enter 確定  Esc 中止]"
-            f"      P:{m}  E:{ext}")
+
+        if self.snapping:
+            # スナップ中は状態が変わったことを一目で分かるようにし、
+            # 常時ヒントは引っ込める（項目数を増やさない）
+            step = math.degrees(self._snap_step())
+            head = (f"[スナップ {step:.0f}° 刻み]  {a}   軸: {axis}   "
+                    f"[Shift でさらに細かく  Ctrl を離すと通常の回転へ]")
+        else:
+            ext = "ON" if self.extend else "OFF"
+            m = "平面断面" if self.mode == "PLANE" else "最近点"
+            head = (f"{a}   軸: {axis}   "
+                    f"[X/Y/Z 拘束  Ctrl スナップ  Shift 精密  "
+                    f"Enter 確定  Esc 中止]"
+                    f"      P:{m}  E:{ext}")
+
+        clamped = self.cache.last_clamped
+        if clamped:
+            head += f"      ※ {clamped} 頂点がレール端で止まり平面に届いていません"
+        context.area.header_text_set(head)
 
     def _finish(self, context):
         context.area.header_text_set(None)
@@ -141,6 +174,8 @@ class MESH_OT_looper_rotate(bpy.types.Operator):
         self.angle = 0.0
         self.axis_lock = None
         self.num_buf = ""
+        self.snapping = False
+        self.snap_fine = False
         self.last_raw = self._screen_angle(event)
 
         context.window.cursor_modal_set('CROSSHAIR')
@@ -151,13 +186,24 @@ class MESH_OT_looper_rotate(bpy.types.Operator):
     def modal(self, context, event):
         ev, val = event.type, event.value
 
+        # 修飾キーは毎イベントで状態を引き直す。押下・解除イベントを
+        # 取りこぼしても状態がずれない。
+        ctrl, shift = event.ctrl, event.shift
+        if ctrl != self.snapping or (ctrl and shift != self.snap_fine):
+            self.snapping, self.snap_fine = ctrl, shift
+            self._apply(context)
+        else:
+            self.snap_fine = shift
+
         if ev == 'MOUSEMOVE':
             raw = self._screen_angle(event)
             if not self.num_buf:
                 d = raw - self.last_raw
                 # -pi..pi へ巻き戻す
                 d = (d + math.pi) % (2 * math.pi) - math.pi
-                self.angle += d * (0.1 if event.shift else 1.0)
+                # Ctrl 併用時の Shift は「細かい刻み」なので減速はしない
+                fine = event.shift and not event.ctrl
+                self.angle += d * (0.1 if fine else 1.0)
                 self._apply(context)
             self.last_raw = raw
             return {'RUNNING_MODAL'}
@@ -202,6 +248,10 @@ class MESH_OT_looper_rotate(bpy.types.Operator):
                 return {'RUNNING_MODAL'}
 
             if ev in {'LEFTMOUSE', 'RET', 'NUMPAD_ENTER'}:
+                # 確定した角度を実値として残す。そうしないと F9 のリドゥが
+                # スナップ前の生の角度で再計算してしまう。
+                self.angle = self._effective_angle()
+                self.snapping = False
                 self._finish(context)
                 return {'FINISHED'}
 
