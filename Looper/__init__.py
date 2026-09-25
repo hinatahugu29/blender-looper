@@ -1,10 +1,14 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 bl_info = {
     "name": "Looper",
-    "author": "",
+    "author": "hinatahugu29",
     "version": (0, 2, 0),
     "blender": (4, 2, 0),
-    "location": "Edit Mode > Ctrl+E / 右クリック / Alt+R",
-    "description": "ループ辺を元メッシュの形状を保ったままスライドさせる",
+    "location": "Edit Mode > Alt+R / Ctrl+E / 右クリックメニュー",
+    "description": "メッシュの形状を保ったままループ辺をスライドさせる",
+    "doc_url": "https://github.com/hinatahugu29/blender-looper",
+    "tracker_url": "https://github.com/hinatahugu29/blender-looper/issues",
     "category": "Mesh",
 }
 

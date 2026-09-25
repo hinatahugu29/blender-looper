@@ -86,3 +86,10 @@ blender --background --factory-startup --python tests/test_modal_core.py
 - 境界エッジの扱い
 - 曲面保存モード（レールを直線でなくスプラインとして扱う）
 - アドオン設定からのキーマップ変更
+
+## ライセンス
+
+GPL-3.0-or-later（[LICENSE](LICENSE)）。
+
+Blender の Python API を利用するアドオンは、慣例的に GPL 互換ライセンスで
+配布されます。

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """レール投影のコアロジック。
 
 bpy に依存せず bmesh / mathutils だけで完結させる（ヘッドレステスト用）。

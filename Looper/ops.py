@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 import bpy
 import bmesh
 from bpy.props import BoolProperty, EnumProperty
