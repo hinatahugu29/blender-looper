@@ -98,8 +98,9 @@ class MESH_OT_looper_rotate(bpy.types.Operator):
         ext = "ON" if self.extend else "OFF"
         m = "平面断面" if self.mode == "PLANE" else "最近点"
         context.area.header_text_set(
-            f"{a}  軸: {axis}  モード(P): {m}  越境(E): {ext}   "
-            f"[X/Y/Z 軸拘束  Shift 精密  数値入力  LMB/Enter 確定  Esc/RMB 中止]")
+            f"{a}   軸: {axis}   "
+            f"[X/Y/Z 拘束  Shift 精密  Enter 確定  Esc 中止]"
+            f"      P:{m}  E:{ext}")
 
     def _finish(self, context):
         context.area.header_text_set(None)

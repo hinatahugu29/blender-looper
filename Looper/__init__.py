@@ -21,23 +21,23 @@ from . import panels
 addon_keymaps = []
 
 
-def _menu_func(self, context):
-    layout = self.layout
+def _draw_entries(layout):
     layout.separator()
     layout.operator(modal.MESH_OT_looper_rotate.bl_idname,
                     text="Looper Rotate")
+    layout.operator(ops.MESH_OT_looper_flatten.bl_idname,
+                    text="Flatten Loop")
     layout.operator(ops.MESH_OT_looper_fix_to_rails.bl_idname,
                     text="Fix Loop to Rails")
 
 
+def _menu_func(self, context):
+    _draw_entries(self.layout)
+
+
 def _context_menu_func(self, context):
     if context.tool_settings.mesh_select_mode[1]:  # 辺モードのときだけ
-        layout = self.layout
-        layout.separator()
-        layout.operator(modal.MESH_OT_looper_rotate.bl_idname,
-                        text="Looper Rotate")
-        layout.operator(ops.MESH_OT_looper_fix_to_rails.bl_idname,
-                        text="Fix Loop to Rails")
+        _draw_entries(self.layout)
 
 
 def register():
