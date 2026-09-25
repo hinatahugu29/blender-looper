@@ -483,3 +483,19 @@ def build_snap_bvh(bm, moving):
     if not polys:
         return None
     return BVHTree.FromPolygons(coords, polys, all_triangles=False)
+
+
+def absolute_plane_angle(normal, axis, reference):
+    """axis まわりで測った、平面の絶対的な傾き。
+
+    reference を 0 度として、normal がそこから何度傾いているかを返す。
+    「XY 平面を 0 度として X 軸まわりに何度」は reference=Z, axis=X。
+
+    rotation_to_normal と同じ ± の畳み込みが入るので、戻り値は必ず
+    -90°..+90° に収まる。平面は 180 度回すと元に戻るので、これが
+    「傾き」として自然な範囲になる。
+
+    軸と法線がほぼ平行で測りようがなければ None。
+    """
+    res = rotation_to_normal(reference, normal, axis=axis)
+    return None if res is None else res[1]

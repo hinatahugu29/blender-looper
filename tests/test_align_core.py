@@ -255,13 +255,91 @@ def test_face_snap_constrained():
     cache.restore()
 
 
+# -- 絶対角度 --------------------------------------------------------------
+
+REF_Z = Vector((0.0, 0.0, 1.0))
+AX_X = Vector((1.0, 0.0, 0.0))
+
+
+def test_absolute_angle_of_flat_loop():
+    print("[test] 水平なループの絶対角度は 0 度")
+    bm = make_cone()
+    loop = loop_at_z(bm, 0.0)
+    cache = core.RailCache(loop)
+    a = core.absolute_plane_angle(cache.normal0, AX_X, REF_Z)
+    check(a is not None and abs(math.degrees(a)) < 1e-4,
+          f"XY 平面上のループは 0° ({math.degrees(a):.4f}°)")
+
+
+def test_absolute_angle_tracks_rotation():
+    print("[test] 回した角度がそのまま絶対角度になる")
+    bm = make_cone()
+    loop = loop_at_z(bm, 0.0)
+    cache = core.RailCache(loop)
+    for deg in (5.0, 12.5, -20.0, 30.0):
+        mat = core.rotation_matrix_about(AX_X, math.radians(deg), cache.pivot)
+        cache.apply_matrix(mat, mode='PLANE')
+        n = core.fit_plane_normal([v.co.copy() for v in loop])
+        a = math.degrees(core.absolute_plane_angle(n, AX_X, REF_Z))
+        check(abs(a - deg) < 1e-3, f"{deg:+.1f}° 回すと絶対 {a:+.3f}°")
+        cache.restore()
+
+
+def test_absolute_target_is_reached():
+    print("[test] 絶対角度の指定どおりに傾く")
+    bm = make_cone()
+    loop = loop_at_z(bm, 0.0)
+    cache = core.RailCache(loop)
+
+    # 開始姿勢をわざと傾けておき、そこから「絶対 25 度にする」
+    start = math.radians(8.0)
+    cache.apply_matrix(core.rotation_matrix_about(AX_X, start, cache.pivot),
+                       mode='PLANE')
+    cache.restore()
+
+    base = core.absolute_plane_angle(cache.normal0, AX_X, REF_Z)
+    target = math.radians(25.0)
+    rel = target - base                      # modal._relative_for_absolute と同じ式
+    cache.apply_matrix(core.rotation_matrix_about(AX_X, rel, cache.pivot),
+                       mode='PLANE')
+    n = core.fit_plane_normal([v.co.copy() for v in loop])
+    got = math.degrees(core.absolute_plane_angle(n, AX_X, REF_Z))
+    check(abs(got - 25.0) < 1e-3, f"絶対 25° 指定 → {got:.4f}°")
+    check(cache.last_clamped == 0, f"クランプなし ({cache.last_clamped})")
+    cache.restore()
+
+
+def test_absolute_angle_folds_to_quarter_turn():
+    print("[test] 絶対角度は -90°..+90° に畳まれる")
+    n = Matrix.Rotation(math.radians(100.0), 4, AX_X).to_3x3() @ REF_Z
+    a = math.degrees(core.absolute_plane_angle(n, AX_X, REF_Z))
+    check(abs(a - (-80.0)) < 1e-3,
+          f"100° 傾いた平面は -80° と等価 ({a:.3f}°)")
+
+    # 畳んだあとも、その角度で実際に同じ姿勢になること
+    back = Matrix.Rotation(math.radians(a), 4, AX_X).to_3x3() @ REF_Z
+    check(min((back - n).length, (back + n).length) < 1e-5,
+          "畳んだ角度で同じ平面が再現できる")
+
+
+def test_absolute_angle_undefined_on_parallel_axis():
+    print("[test] 軸と法線が平行なら測れない")
+    check(core.absolute_plane_angle(REF_Z, REF_Z, REF_Z) is None,
+          "基準と軸が同じ向きなら None")
+
+
 def run_all():
     for fn in (test_rotation_to_normal_free, test_rotation_to_normal_sign,
                test_rotation_to_normal_constrained, test_snap_angle,
                test_apply_plane_matches_matrix, test_apply_plane_aligns_to_target,
                test_apply_plane_reports_clamping, test_align_roundtrip,
                test_snap_bvh_excludes_moving_faces, test_face_snap_pipeline,
-               test_face_snap_constrained):
+               test_face_snap_constrained,
+               test_absolute_angle_of_flat_loop,
+               test_absolute_angle_tracks_rotation,
+               test_absolute_target_is_reached,
+               test_absolute_angle_folds_to_quarter_turn,
+               test_absolute_angle_undefined_on_parallel_axis):
         fn()
 
 

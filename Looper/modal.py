@@ -21,6 +21,15 @@ from . import ops
 SNAP_STEP = math.radians(5.0)
 SNAP_STEP_FINE = math.radians(1.0)
 
+# 絶対角度の基準面。拘束軸まわりに測るので、軸と平行でない法線を選ぶ。
+# X / Y 軸まわりなら「XY 平面（法線 Z）を 0 度」、Z 軸まわりだけは
+# Z を基準にできないので YZ 平面（法線 X）を 0 度とする。
+_ABS_REFERENCE = {
+    'X': Vector((0.0, 0.0, 1.0)),
+    'Y': Vector((0.0, 0.0, 1.0)),
+    'Z': Vector((1.0, 0.0, 0.0)),
+}
+
 _NUM_CHARS = {
     'ZERO': '0', 'ONE': '1', 'TWO': '2', 'THREE': '3', 'FOUR': '4',
     'FIVE': '5', 'SIX': '6', 'SEVEN': '7', 'EIGHT': '8', 'NINE': '9',
@@ -117,6 +126,56 @@ class MESH_OT_looper_rotate(bpy.types.Operator):
         if res is not None:
             self.face_rot = res
 
+    def _absolute_angle(self, angle=None):
+        """今のループ平面が、拘束軸まわりで何度傾いているか（ワールド基準）。
+
+        軸拘束が無いときは基準が視点依存になって意味を失うので None。
+        angle を渡すと「その相対角度まで回したときの絶対角度」を返す。
+        """
+        if self.axis_lock is None or self.cache.normal0 is None:
+            return None
+        if angle is None:
+            angle = self._current_rotation()[1]
+        axis_local, _ = self._current_rotation()
+        local = (core.rotation_matrix_about(axis_local, angle, self.cache.pivot)
+                 .to_3x3() @ self.cache.normal0)
+        # 法線のローカル→ワールドは逆転置行列。ここを 3x3 で済ませると
+        # 非一様スケールのオブジェクトで角度がずれる。
+        world = (self.mat3_nrm @ local).normalized()
+        axis_world = Vector((0.0, 0.0, 0.0))
+        axis_world['XYZ'.index(self.axis_lock)] = 1.0
+        return core.absolute_plane_angle(world, axis_world,
+                                         _ABS_REFERENCE[self.axis_lock])
+
+    def _relative_for_absolute(self, target_abs):
+        """絶対角度 target_abs にするために必要な、開始姿勢からの相対角度。
+
+        拘束軸まわりの傾きは加算的なので、開始時の絶対角度との差を取るだけ。
+        """
+        base = self._absolute_angle(angle=0.0)
+        return None if base is None else target_abs - base
+
+    def _num_is_absolute(self):
+        """数値入力を絶対角度として解釈するか。
+
+        角度は 1 自由度、法線は 2 自由度なので、絶対指定は「どの軸まわりか」が
+        決まっていないと姿勢が定まらない。拘束が無いときは常に相対。
+        """
+        return self.num_absolute and self.axis_lock is not None
+
+    def _commit_num(self):
+        """数値バッファを角度へ反映する。"""
+        try:
+            val = math.radians(float(self.num_buf or 0))
+        except ValueError:
+            return                      # 入力途中の "-" や "." はまだ数にならない
+        if self._num_is_absolute():
+            rel = self._relative_for_absolute(val)
+            if rel is not None:
+                self.angle = rel
+                return
+        self.angle = val
+
     def _snap_step(self):
         return SNAP_STEP_FINE if self.snap_fine else SNAP_STEP
 
@@ -152,10 +211,18 @@ class MESH_OT_looper_rotate(bpy.types.Operator):
 
     def _header(self, context):
         if self.num_buf:
-            a = f"角度: [{self.num_buf}]"
+            label = "絶対角度" if self._num_is_absolute() else "角度"
+            a = f"{label}: [{self.num_buf}]"
         else:
-            a = f"角度: {math.degrees(self._current_rotation()[1]):.2f}°"
+            a = f"角度: {math.degrees(self._current_rotation()[1]):+.2f}°"
         axis = self.axis_lock if self.axis_lock else "ビュー"
+
+        # 絶対角度は「今何度なのか」が分からないと指定しようがないので、
+        # 拘束中は常に見えるようにしておく
+        abs_a = self._absolute_angle()
+        if abs_a is not None:
+            ref = "YZ" if self.axis_lock == 'Z' else "XY"
+            a += f"   絶対: {math.degrees(abs_a):+.2f}° ({ref}平面から)"
 
         if self._face_snapping:
             state = "面に整列" if self.face_rot else "面を指してください"
@@ -171,8 +238,9 @@ class MESH_OT_looper_rotate(bpy.types.Operator):
         else:
             ext = "ON" if self.extend else "OFF"
             m = "平面断面" if self.mode == "PLANE" else "最近点"
+            num = "  A 絶対/相対" if self.axis_lock else ""
             head = (f"{a}   軸: {axis}   "
-                    f"[X/Y/Z 拘束  Ctrl スナップ  Shift 精密  "
+                    f"[X/Y/Z 拘束  Ctrl スナップ  Shift 精密{num}  "
                     f"Enter 確定  Esc 中止]"
                     f"      P:{m}  E:{ext}")
 
@@ -223,7 +291,10 @@ class MESH_OT_looper_rotate(bpy.types.Operator):
         self.snapping = False
         self.snap_fine = False
         self.face_rot = None
+        self.num_absolute = True
         self.mw_inv = ob.matrix_world.inverted()
+        # 法線をローカル→ワールドへ移すのは逆転置行列
+        self.mat3_nrm = ob.matrix_world.to_3x3().inverted().transposed()
         self.bvh = core.build_snap_bvh(self.bm, sel)
         self.last_raw = self._screen_angle(event)
 
@@ -271,19 +342,19 @@ class MESH_OT_looper_rotate(bpy.types.Operator):
         if val == 'PRESS':
             if ev in _NUM_CHARS:
                 self.num_buf += _NUM_CHARS[ev]
-                try:
-                    self.angle = math.radians(float(self.num_buf))
-                except ValueError:
-                    pass
+                self._commit_num()
                 self._apply(context)
                 return {'RUNNING_MODAL'}
 
             if ev == 'BACK_SPACE' and self.num_buf:
                 self.num_buf = self.num_buf[:-1]
-                try:
-                    self.angle = math.radians(float(self.num_buf or 0))
-                except ValueError:
-                    pass
+                self._commit_num()
+                self._apply(context)
+                return {'RUNNING_MODAL'}
+
+            if ev == 'A' and self.axis_lock:
+                self.num_absolute = not self.num_absolute
+                self._commit_num()
                 self._apply(context)
                 return {'RUNNING_MODAL'}
 
@@ -293,6 +364,8 @@ class MESH_OT_looper_rotate(bpy.types.Operator):
                     # 拘束が変われば「その軸で最も近づく角度」も変わる
                     self.face_rot = None
                     self._update_face_snap(event)
+                # 絶対角度は拘束軸まわりで測るので、軸が変われば意味が変わる
+                self._commit_num()
                 self._apply(context)
                 return {'RUNNING_MODAL'}
 
