@@ -319,10 +319,13 @@ class RailCache:
     entries: [(vert, orig_co, points|None, center)]
     """
 
-    __slots__ = ("entries", "pivot", "railless", "normal0", "last_clamped")
+    __slots__ = ("entries", "pivot", "railless", "normal0", "last_clamped",
+                 "clamped_co")
 
     def __init__(self, verts, extend_build=True):
         self.last_clamped = 0
+        self.clamped_co = []
+        self.clamped_co = []
         blocked = set(verts)
         self.entries = []
         self.railless = 0
@@ -360,7 +363,7 @@ class RailCache:
         0 でなければ結果は平面に乗っていないので、呼び出し側で知らせること。
         """
         n = normal.normalized()
-        clamped = 0
+        clamped = []
         for v, orig, points, center in self.entries:
             if points is None:
                 v.co = (fallback_mat @ orig) if fallback_mat else orig.copy()
@@ -368,10 +371,13 @@ class RailCache:
             co, hit = intersect_rail_plane_ex(points, center, orig,
                                               n, plane_pt, extend)
             if not hit:
-                clamped += 1
+                # 位置も控える。「6 頂点が届いていません」より「この 6 点」の
+                # 方が対処できる
+                clamped.append(co.copy())
             v.co = co
-        self.last_clamped = clamped
-        return clamped
+        self.clamped_co = clamped
+        self.last_clamped = len(clamped)
+        return self.last_clamped
 
     def apply_matrix(self, mat, extend=True, mode='NEAREST'):
         """orig 座標に mat を適用してからレールへ乗せ直す。
@@ -388,6 +394,7 @@ class RailCache:
             return 0.0
 
         self.last_clamped = 0
+        self.clamped_co = []
         max_off = 0.0
         for v, orig, points, center in self.entries:
             target = mat @ orig
@@ -511,6 +518,9 @@ def walk_edge_loop(edge, limit=MAX_WALK):
     こちらは狙ったループそのものを辿る、という違いだけ。
 
     平面フィットは頂点順序を必要としないので、順序は保証しない。
+    辺も返すのは、拾ったループを画面に描いて見せるため。
+
+    戻り値: (頂点のリスト, 辺のリスト)
     """
     verts = {edge.verts[0], edge.verts[1]}
     seen = {edge}
@@ -524,7 +534,7 @@ def walk_edge_loop(edge, limit=MAX_WALK):
             cur_v = _other(nxt_e, cur_v)
             verts.add(cur_v)
             cur_e = nxt_e
-    return list(verts)
+    return list(verts), list(seen)
 
 
 def closest_edge_in_face(face, co):
@@ -544,12 +554,12 @@ def loop_plane_at(face, co, blocked=()):
     blocked（＝動かす頂点）がループに含まれていたら None を返す。
     動いているループに揃えようとすると参照が循環する。
 
-    戻り値: (法線, ループ重心, 頂点数) / 求まらなければ None
+    戻り値: (法線, ループ重心, 頂点のリスト, 辺のリスト) / 求まらなければ None
     """
     edge = closest_edge_in_face(face, co)
     if edge is None:
         return None
-    verts = walk_edge_loop(edge)
+    verts, edges = walk_edge_loop(edge)
     if len(verts) < 3:
         return None
     blocked = set(blocked)
@@ -560,7 +570,12 @@ def loop_plane_at(face, co, blocked=()):
     if normal is None:
         return None
     center = sum(pts, Vector()) / len(pts)
-    return normal, center, len(pts)
+    return normal, center, verts, edges
+
+
+def edge_segments(edges):
+    """辺のリストを、描画用の座標ペアの列にする。"""
+    return [(e.verts[0].co.copy(), e.verts[1].co.copy()) for e in edges]
 
 
 def snap_rotation_from_ray(bvh, faces, origin, direction, normal0,
@@ -570,23 +585,28 @@ def snap_rotation_from_ray(bvh, faces, origin, direction, normal0,
     モーダルから座標計算を切り離しておくための関数。bpy に触れないので、
     ヘッドレスで実際にレイを飛ばして検証できる。
 
-    戻り値: ((軸, 角度) または None, 説明文)
+    戻り値: ((軸, 角度) または None, 説明文, 描画用の線分リスト)
+    線分は何を拾ったかを画面に描いて見せるためのもの（ローカル座標）。
+    「指した位置に最も近い辺」で決まる以上、拾った対象は見えないと確かめ
+    ようがない。
     """
     if bvh is None or normal0 is None:
-        return None, ""
+        return None, "", []
     hit = bvh.ray_cast(origin, direction)
     if hit is None:
-        return None, ""
+        return None, "", []
     loc, nrm, idx, _dist = hit
     if nrm is None or idx is None or idx >= len(faces):
-        return None, ""
+        return None, "", []
 
     if snap_type == 'FACE':
         target, info = nrm, "面に整列"
+        preview = edge_segments(faces[idx].edges)
     else:
         res = loop_plane_at(faces[idx], loc, blocked=moving)
         if res is None:
-            return None, "ループを特定できません"
-        target, info = res[0], f"ループに整列 ({res[2]} 頂点)"
+            return None, "ループを特定できません", []
+        target, info = res[0], f"ループに整列 ({len(res[2])} 頂点)"
+        preview = edge_segments(res[3])
 
-    return rotation_to_normal(normal0, target, axis=axis), info
+    return rotation_to_normal(normal0, target, axis=axis), info, preview

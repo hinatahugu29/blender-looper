@@ -339,7 +339,7 @@ def test_walk_edge_loop_closed():
     # ループ内の辺を1本選び、そこから一周できるか
     edge = next(e for e in bm.edges
                 if e.verts[0] in target and e.verts[1] in target)
-    verts = core.walk_edge_loop(edge)
+    verts, edges = core.walk_edge_loop(edge)
     check(len(verts) == len(loop),
           f"12 頂点すべてを辿れた ({len(verts)}/{len(loop)})")
     check(set(verts) == target, "辿った頂点が元のループと一致")
@@ -365,7 +365,8 @@ def test_loop_plane_at_finds_neighbour_loop():
 
     res = core.loop_plane_at(face, co, blocked=moving_set)
     check(res is not None, "ループ平面が求まった")
-    normal, center, n = res
+    normal, center, lverts, ledges = res
+    n = len(lverts)
     check(n == 12, f"隣ループ 12 頂点を拾った ({n})")
     check(abs(abs(normal.z) - 1.0) < 1e-5,
           f"水平なループなので法線は Z ({normal.z:.6f})")
@@ -449,7 +450,7 @@ def test_snap_from_ray_face():
     cap = next(f for f in faces if abs(f.normal.z) > 0.99)
     origin, direction = _ray_to(cap.calc_center_median(), -cap.normal)
 
-    rot, info = core.snap_rotation_from_ray(
+    rot, info, preview = core.snap_rotation_from_ray(
         bvh, faces, origin, direction, cache.normal0,
         snap_type='FACE', moving=moving_set)
     check(rot is not None, f"面を拾って回転が求まった (info={info!r})")
@@ -457,7 +458,7 @@ def test_snap_from_ray_face():
 
     side = next(f for f in faces if abs(f.normal.z) < 0.9)
     origin, direction = _ray_to(side.calc_center_median(), -side.normal)
-    rot2, info2 = core.snap_rotation_from_ray(
+    rot2, info2, preview2 = core.snap_rotation_from_ray(
         bvh, faces, origin, direction, cache.normal0,
         snap_type='FACE', moving=moving_set)
     check(rot2 is not None, "側面でも回転が求まる")
@@ -473,7 +474,7 @@ def test_snap_from_ray_misses():
     cache = core.RailCache(moving)
     origin = Vector((50.0, 50.0, 50.0))
     direction = Vector((0.0, 0.0, 1.0))
-    rot, info = core.snap_rotation_from_ray(
+    rot, info, preview = core.snap_rotation_from_ray(
         bvh, faces, origin, direction, cache.normal0, snap_type='FACE')
     check(rot is None and info == "", f"外すと None ({rot}, {info!r})")
 
@@ -505,7 +506,7 @@ def test_snap_from_ray_loop():
     outward = Vector((mid.x, mid.y, 0.0))
     origin, direction = _ray_to(mid, -outward)
 
-    rot, info = core.snap_rotation_from_ray(
+    rot, info, preview = core.snap_rotation_from_ray(
         bvh, faces, origin, direction, cache.normal0,
         snap_type='LOOP', moving=moving_set)
     check(rot is not None, f"ループを拾って回転が求まった (info={info!r})")
@@ -537,7 +538,7 @@ def test_snap_from_ray_rejects_own_loop():
     outward = Vector((mid.x, mid.y, 0.0))
     origin, direction = _ray_to(mid, -outward)
 
-    rot, info = core.snap_rotation_from_ray(
+    rot, info, preview = core.snap_rotation_from_ray(
         bvh, faces, origin, direction, cache.normal0,
         snap_type='LOOP', moving=moving_set)
     check(rot is None, f"回転は返さない ({rot})")
@@ -556,7 +557,7 @@ def test_snap_from_ray_respects_axis_lock():
     side = next(f for f in faces
                 if abs(f.normal.z) < 0.9 and abs(f.normal.x) > 0.3)
     origin, direction = _ray_to(side.calc_center_median(), -side.normal)
-    rot, _info = core.snap_rotation_from_ray(
+    rot, _info, _prev = core.snap_rotation_from_ray(
         bvh, faces, origin, direction, cache.normal0,
         snap_type='FACE', axis=axis)
     check(rot is not None, "拘束付きでも回転が求まる")
@@ -568,6 +569,68 @@ def test_snap_type_ids_match_ui():
     from Looper import ops as looper_ops
     ids = [i[0] for i in looper_ops.SNAP_ITEMS]
     check(ids == ['INCREMENT', 'FACE', 'LOOP'], f"順序と内容 ({ids})")
+
+
+# -- 描画用データ ----------------------------------------------------------
+
+def test_preview_segments_describe_the_target():
+    print("[test] 拾った対象の線分が返る")
+    bm = make_cone(segments=12, cuts=3)
+    moving = loop_at_z(bm, 0.0)
+    moving_set = set(moving)
+    bvh, faces = core.build_snap_bvh(bm, moving)
+    cache = core.RailCache(moving)
+
+    cap = next(f for f in faces if abs(f.normal.z) > 0.99)
+    origin, direction = _ray_to(cap.calc_center_median(), -cap.normal)
+    _rot, _info, prev = core.snap_rotation_from_ray(
+        bvh, faces, origin, direction, cache.normal0, snap_type='FACE')
+    check(len(prev) == len(cap.edges),
+          f"面スナップは面の辺を返す ({len(prev)}/{len(cap.edges)})")
+
+    nb = [v for v in bm.verts
+          if v not in moving_set and abs(v.co.z - 0.5) < 1e-4]
+    nb_set = set(nb)
+    edge = next(e for e in bm.edges
+                if e.verts[0] in nb_set and e.verts[1] in nb_set)
+    mid = (edge.verts[0].co + edge.verts[1].co) / 2.0
+    origin, direction = _ray_to(mid, -Vector((mid.x, mid.y, 0.0)))
+    _rot, info, prev = core.snap_rotation_from_ray(
+        bvh, faces, origin, direction, cache.normal0,
+        snap_type='LOOP', moving=moving_set)
+    check(len(prev) == 12, f"ループスナップは 12 辺を返す ({len(prev)})")
+    check(all(len(s) == 2 for s in prev), "各要素が 2 点の線分")
+    # 返った線分が本当にそのループ上にあるか
+    zs = [p.z for s in prev for p in s]
+    check(max(abs(z - 0.5) for z in zs) < 1e-4,
+          "線分がすべて隣ループの高さにある")
+
+
+def test_clamped_positions_are_recorded():
+    print("[test] 届かなかった頂点の位置が控えられる")
+    bm = make_cone(segments=12, cuts=3)
+    loop = loop_at_z(bm, 0.0)
+    cache = core.RailCache(loop)
+    far = cache.pivot + Vector((0.0, 0.0, 100.0))
+    n = cache.apply_plane(Vector((0.0, 0.0, 1.0)), far)
+    check(n == len(loop), f"全頂点がクランプ ({n})")
+    check(len(cache.clamped_co) == n, f"位置も同数 ({len(cache.clamped_co)})")
+    check(all(isinstance(c, Vector) for c in cache.clamped_co),
+          "座標として取り出せる")
+    cache.restore()
+
+    # クランプが解消されたら記録も消える
+    cache.apply_plane(cache.normal0, cache.pivot)
+    check(cache.clamped_co == [], "届く平面では空になる")
+    cache.restore()
+
+    # NEAREST 経路でも古い記録が残らない
+    cache.apply_plane(Vector((0.0, 0.0, 1.0)), far)
+    cache.apply_matrix(core.rotation_matrix_about(
+        Vector((1.0, 0.0, 0.0)), 0.1, cache.pivot), mode='NEAREST')
+    check(cache.clamped_co == [] and cache.last_clamped == 0,
+          "最近点モードでは記録がクリアされる")
+    cache.restore()
 
 
 def run_all():
@@ -589,7 +652,9 @@ def run_all():
                test_snap_from_ray_face, test_snap_from_ray_misses,
                test_snap_from_ray_loop, test_snap_from_ray_rejects_own_loop,
                test_snap_from_ray_respects_axis_lock,
-               test_snap_type_ids_match_ui):
+               test_snap_type_ids_match_ui,
+               test_preview_segments_describe_the_target,
+               test_clamped_positions_are_recorded):
         fn()
 
 

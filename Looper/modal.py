@@ -10,6 +10,8 @@ import math
 import bpy
 import bmesh
 from bpy.props import BoolProperty
+import gpu
+from gpu_extras.batch import batch_for_shader
 from bpy_extras import view3d_utils
 from mathutils import Vector
 
@@ -24,6 +26,15 @@ SNAP_STEP_FINE = math.radians(1.0)
 # 絶対角度の基準面。拘束軸まわりに測るので、軸と平行でない法線を選ぶ。
 # X / Y 軸まわりなら「XY 平面（法線 Z）を 0 度」、Z 軸まわりだけは
 # Z を基準にできないので YZ 平面（法線 X）を 0 度とする。
+# 軸の色は Blender の慣習に合わせる。文字を読まなくても何に拘束中か分かる。
+_AXIS_COLOR = {
+    'X': (1.0, 0.25, 0.35, 0.9),
+    'Y': (0.5, 0.85, 0.2, 0.9),
+    'Z': (0.2, 0.55, 1.0, 0.9),
+}
+_SNAP_COLOR = (1.0, 0.7, 0.1, 1.0)      # 拾ったスナップ先
+_CLAMP_COLOR = (1.0, 0.3, 0.1, 1.0)     # 平面に届かなかった頂点
+
 _ABS_REFERENCE = {
     'X': Vector((0.0, 0.0, 1.0)),
     'Y': Vector((0.0, 0.0, 1.0)),
@@ -115,11 +126,12 @@ class MESH_OT_looper_rotate(bpy.types.Operator):
         確定後のリドゥも通常の回転とまったく同じ経路に乗る。
         """
         origin, direction = self._cursor_ray(event)
-        rot, info = core.snap_rotation_from_ray(
+        rot, info, preview = core.snap_rotation_from_ray(
             self.bvh, self.snap_faces, origin, direction,
             self.cache.normal0, snap_type=self.snap_type, moving=self.moving,
             axis=self._local_axis() if self.axis_lock else None)
         self.snap_info = info
+        self.snap_preview = [(self.mw @ a, self.mw @ b) for a, b in preview]
         if rot is not None:
             self.face_rot = rot
 
@@ -205,7 +217,52 @@ class MESH_OT_looper_rotate(bpy.types.Operator):
         self.cache.apply_matrix(mat, extend=self.extend, mode=self.mode)
         self.bm.normal_update()
         bmesh.update_edit_mesh(self.me, loop_triangles=False, destructive=False)
+        if self.region:
+            self.region.tag_redraw()    # スナップ先の表示だけが変わる場合もある
         self._header(context)
+
+    # -- 3D ビューへの描画 -------------------------------------------------
+    def _draw_3d(self):
+        """拾ったスナップ先・拘束軸・届かなかった頂点を描く。
+
+        テキストで「12 頂点のループ」と言われても、それが狙ったループかは
+        確かめようがない。見えれば一発で分かる。
+        """
+        try:
+            shader = gpu.shader.from_builtin('UNIFORM_COLOR')
+            gpu.state.blend_set('ALPHA')
+            gpu.state.depth_test_set('NONE')   # 陰に隠れても見せる
+
+            if self.snap_preview:
+                gpu.state.line_width_set(3.0)
+                pts = [p for seg in self.snap_preview for p in seg]
+                shader.uniform_float("color", _SNAP_COLOR)
+                batch_for_shader(shader, 'LINES', {"pos": pts}).draw(shader)
+
+            if self.axis_lock:
+                gpu.state.line_width_set(1.5)
+                shader.uniform_float("color", _AXIS_COLOR[self.axis_lock])
+                batch_for_shader(shader, 'LINES',
+                                 {"pos": self._axis_line()}).draw(shader)
+
+            clamped = self.cache.clamped_co
+            if clamped:
+                gpu.state.point_size_set(9.0)
+                shader.uniform_float("color", _CLAMP_COLOR)
+                pts = [self.mw @ co for co in clamped]
+                batch_for_shader(shader, 'POINTS', {"pos": pts}).draw(shader)
+        finally:
+            gpu.state.line_width_set(1.0)
+            gpu.state.point_size_set(1.0)
+            gpu.state.depth_test_set('LESS_EQUAL')
+            gpu.state.blend_set('NONE')
+
+    def _axis_line(self):
+        """拘束軸をピボットを通る線分として返す（ワールド座標）。"""
+        pivot = self.mw @ self.cache.pivot
+        d = Vector((0.0, 0.0, 0.0))
+        d['XYZ'.index(self.axis_lock)] = 1.0
+        return [pivot - d * self.axis_len, pivot + d * self.axis_len]
 
     def _snap_label(self):
         return {'INCREMENT': "刻み", 'FACE': "面", 'LOOP': "ループ"}[
@@ -269,9 +326,16 @@ class MESH_OT_looper_rotate(bpy.types.Operator):
             context.workspace.status_text_set(text)
 
     def _finish(self, context):
+        # ハンドラが残ると描画され続けて Blender の再起動が要る。
+        # 確定・中止・例外のどの経路からも必ずここを通すこと。
+        if self._handle is not None:
+            bpy.types.SpaceView3D.draw_handler_remove(self._handle, 'WINDOW')
+            self._handle = None
         context.area.header_text_set(None)
         context.workspace.status_text_set(None)
         context.window.cursor_modal_restore()
+        if self.region:
+            self.region.tag_redraw()
 
     # -- 実行 -------------------------------------------------------------
     def invoke(self, context, event):
@@ -283,6 +347,9 @@ class MESH_OT_looper_rotate(bpy.types.Operator):
             self.mode = st.mode
             self.extend = st.extend
             self.snap_type = st.snap_type
+
+        self._handle = None
+        self.region = None
 
         ob = context.edit_object
         self.me = ob.data
@@ -321,7 +388,11 @@ class MESH_OT_looper_rotate(bpy.types.Operator):
         self.snap_fine = False
         self.face_rot = None
         self.snap_info = ""
+        self.snap_preview = []
         self.status_text = None
+        self.mw = ob.matrix_world.copy()
+        dims = ob.dimensions
+        self.axis_len = max(dims.x, dims.y, dims.z, 1.0) * 2.0
         self.num_absolute = True
         self.moving = set(sel)
         self.mw_inv = ob.matrix_world.inverted()
@@ -332,11 +403,27 @@ class MESH_OT_looper_rotate(bpy.types.Operator):
         self.last_raw = self._screen_angle(event)
 
         context.window.cursor_modal_set('CROSSHAIR')
+        self._handle = bpy.types.SpaceView3D.draw_handler_add(
+            self._draw_3d, (), 'WINDOW', 'POST_VIEW')
         self._apply(context)
         context.window_manager.modal_handler_add(self)
         return {'RUNNING_MODAL'}
 
     def modal(self, context, event):
+        # 途中で例外が出てもハンドラを残さない。残すと描画され続ける。
+        try:
+            return self._modal(context, event)
+        except Exception:
+            import traceback
+            traceback.print_exc()
+            self.cache.restore()
+            bmesh.update_edit_mesh(self.me, loop_triangles=False,
+                                   destructive=False)
+            self._finish(context)
+            self.report({'ERROR'}, "Looper Rotate が中断しました（コンソール参照）")
+            return {'CANCELLED'}
+
+    def _modal(self, context, event):
         ev, val = event.type, event.value
 
         # 修飾キーは毎イベントで状態を引き直す。押下・解除イベントを
