@@ -3,7 +3,7 @@
 bl_info = {
     "name": "Looper",
     "author": "hinatahugu29",
-    "version": (0, 3, 0),
+    "version": (0, 4, 0),
     "blender": (4, 2, 0),
     "location": "Edit Mode > Nパネル(Looper) / Alt+R / Ctrl+E / 右クリック",
     "description": "メッシュの形状を保ったままループ辺をスライドさせる",
