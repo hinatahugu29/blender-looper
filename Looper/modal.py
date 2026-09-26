@@ -285,6 +285,9 @@ class MESH_OT_looper_rotate(bpy.types.Operator):
         if abs_a is not None:
             ref = "YZ" if self.axis_lock == 'Z' else "XY"
             a += f"   絶対 {math.degrees(abs_a):+8.2f}° ({ref})"
+            # 数値入力が絶対と相対のどちらで解釈されるかは、打ち始める前に
+            # 見えている必要がある。A を押しても無反応に見えるのが一番困る。
+            a += f"   数値:{'絶対' if self.num_absolute else '相対'}"
 
         axis = f"軸 {self.axis_lock}" if self.axis_lock else "軸 ビュー"
 
@@ -318,7 +321,8 @@ class MESH_OT_looper_rotate(bpy.types.Operator):
         else:
             keys = ("X/Y/Z 軸拘束", "Ctrl スナップ", "S スナップ先",
                     "Shift 精密", "数値 角度入力",
-                    *(("A 絶対/相対",) if self.axis_lock else ()),
+                    *((f"A 数値入力を{'相対' if self.num_absolute else '絶対'}へ",)
+                      if self.axis_lock else ()),
                     "P モード", "E 越境", "Enter 確定", "Esc 中止")
         text = "  |  ".join(keys)
         if text != self.status_text:
