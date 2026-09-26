@@ -427,6 +427,149 @@ def test_loop_align_pipeline():
     cache.restore()
 
 
+# -- レイからスナップまでの通し ---------------------------------------------
+#
+# モーダルのマウス座標計算だけを外し、それ以外は実機と同じ経路を通す。
+# 「ホバーしても効かない」を検出できるのはこの層。
+
+def _ray_to(point, from_dir, dist=10.0):
+    """point を狙って from_dir 方向から飛ばすレイ (origin, direction)。"""
+    d = from_dir.normalized()
+    return point - d * dist, d
+
+
+def test_snap_from_ray_face():
+    print("[test] レイを飛ばして面スナップが成立する")
+    bm = make_cone(segments=12, cuts=3)
+    moving = loop_at_z(bm, 0.0)
+    moving_set = set(moving)
+    bvh, faces = core.build_snap_bvh(bm, moving)
+    cache = core.RailCache(moving)
+
+    cap = next(f for f in faces if abs(f.normal.z) > 0.99)
+    origin, direction = _ray_to(cap.calc_center_median(), -cap.normal)
+
+    rot, info = core.snap_rotation_from_ray(
+        bvh, faces, origin, direction, cache.normal0,
+        snap_type='FACE', moving=moving_set)
+    check(rot is not None, f"面を拾って回転が求まった (info={info!r})")
+    check(info == "面に整列", f"状態表示が正しい ({info!r})")
+
+    side = next(f for f in faces if abs(f.normal.z) < 0.9)
+    origin, direction = _ray_to(side.calc_center_median(), -side.normal)
+    rot2, info2 = core.snap_rotation_from_ray(
+        bvh, faces, origin, direction, cache.normal0,
+        snap_type='FACE', moving=moving_set)
+    check(rot2 is not None, "側面でも回転が求まる")
+    check(abs(rot2[1]) > math.radians(1.0),
+          f"側面を指すと実際に角度がつく ({math.degrees(rot2[1]):.2f}°)")
+
+
+def test_snap_from_ray_misses():
+    print("[test] 何も無いところを指すと何も起きない")
+    bm = make_cone(segments=12, cuts=3)
+    moving = loop_at_z(bm, 0.0)
+    bvh, faces = core.build_snap_bvh(bm, moving)
+    cache = core.RailCache(moving)
+    origin = Vector((50.0, 50.0, 50.0))
+    direction = Vector((0.0, 0.0, 1.0))
+    rot, info = core.snap_rotation_from_ray(
+        bvh, faces, origin, direction, cache.normal0, snap_type='FACE')
+    check(rot is None and info == "", f"外すと None ({rot}, {info!r})")
+
+
+def test_snap_from_ray_loop():
+    print("[test] レイを飛ばしてループスナップが成立する")
+    bm = make_cone(segments=12, cuts=3)
+    moving = loop_at_z(bm, 0.0)
+    moving_set = set(moving)
+
+    # 上の隣ループを 15° 傾けておき、それを狙って拾えるか
+    nb = [v for v in bm.verts
+          if v not in moving_set and abs(v.co.z - 0.5) < 1e-4]
+    nb_cache = core.RailCache(nb)
+    nb_cache.apply_matrix(
+        core.rotation_matrix_about(Vector((1.0, 0.0, 0.0)),
+                                   math.radians(15.0), nb_cache.pivot),
+        mode='PLANE')
+    want = core.fit_plane_normal([v.co.copy() for v in nb])
+
+    bvh, faces = core.build_snap_bvh(bm, moving)
+    cache = core.RailCache(moving)
+
+    # 傾けた隣ループの辺のひとつを、その辺の中点めがけて狙う
+    nb_set = set(nb)
+    edge = next(e for e in bm.edges
+                if e.verts[0] in nb_set and e.verts[1] in nb_set)
+    mid = (edge.verts[0].co + edge.verts[1].co) / 2.0
+    outward = Vector((mid.x, mid.y, 0.0))
+    origin, direction = _ray_to(mid, -outward)
+
+    rot, info = core.snap_rotation_from_ray(
+        bvh, faces, origin, direction, cache.normal0,
+        snap_type='LOOP', moving=moving_set)
+    check(rot is not None, f"ループを拾って回転が求まった (info={info!r})")
+    check("ループに整列" in info and "12" in info,
+          f"拾ったループの頂点数が出る ({info!r})")
+
+    ax, ang = rot
+    cache.apply_matrix(core.rotation_matrix_about(ax, ang, cache.pivot),
+                       mode='PLANE')
+    got = core.fit_plane_normal([v.co.copy() for v in moving])
+    if got.dot(want) < 0:
+        got = -got
+    err = (got - want).length
+    check(err < 1e-4, f"狙ったループと平行になった (誤差 {err:.3e})")
+    cache.restore()
+
+
+def test_snap_from_ray_rejects_own_loop():
+    print("[test] 自分のループを狙っても拒否される")
+    bm = make_cone(segments=12, cuts=3)
+    moving = loop_at_z(bm, 0.0)
+    moving_set = set(moving)
+    bvh, faces = core.build_snap_bvh(bm, moving)
+    cache = core.RailCache(moving)
+
+    edge = next(e for e in bm.edges
+                if e.verts[0] in moving_set and e.verts[1] in moving_set)
+    mid = (edge.verts[0].co + edge.verts[1].co) / 2.0
+    outward = Vector((mid.x, mid.y, 0.0))
+    origin, direction = _ray_to(mid, -outward)
+
+    rot, info = core.snap_rotation_from_ray(
+        bvh, faces, origin, direction, cache.normal0,
+        snap_type='LOOP', moving=moving_set)
+    check(rot is None, f"回転は返さない ({rot})")
+    check(info in ("", "ループを特定できません"),
+          f"状態表示で理由が分かる ({info!r})")
+
+
+def test_snap_from_ray_respects_axis_lock():
+    print("[test] レイ経由でも軸拘束を破らない")
+    bm = make_cone(segments=12, cuts=3)
+    moving = loop_at_z(bm, 0.0)
+    bvh, faces = core.build_snap_bvh(bm, moving)
+    cache = core.RailCache(moving)
+    axis = Vector((1.0, 0.0, 0.0))
+
+    side = next(f for f in faces
+                if abs(f.normal.z) < 0.9 and abs(f.normal.x) > 0.3)
+    origin, direction = _ray_to(side.calc_center_median(), -side.normal)
+    rot, _info = core.snap_rotation_from_ray(
+        bvh, faces, origin, direction, cache.normal0,
+        snap_type='FACE', axis=axis)
+    check(rot is not None, "拘束付きでも回転が求まる")
+    check((rot[0] - axis).length < 1e-9, "返る軸が拘束軸そのもの")
+
+
+def test_snap_type_ids_match_ui():
+    print("[test] S キーが巡回する ID が UI と一致している")
+    from Looper import ops as looper_ops
+    ids = [i[0] for i in looper_ops.SNAP_ITEMS]
+    check(ids == ['INCREMENT', 'FACE', 'LOOP'], f"順序と内容 ({ids})")
+
+
 def run_all():
     for fn in (test_rotation_to_normal_free, test_rotation_to_normal_sign,
                test_rotation_to_normal_constrained, test_snap_angle,
@@ -442,7 +585,11 @@ def run_all():
                test_walk_edge_loop_closed,
                test_loop_plane_at_finds_neighbour_loop,
                test_loop_plane_rejects_moving_loop,
-               test_loop_align_pipeline):
+               test_loop_align_pipeline,
+               test_snap_from_ray_face, test_snap_from_ray_misses,
+               test_snap_from_ray_loop, test_snap_from_ray_rejects_own_loop,
+               test_snap_from_ray_respects_axis_lock,
+               test_snap_type_ids_match_ui):
         fn()
 
 

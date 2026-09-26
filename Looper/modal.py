@@ -98,40 +98,15 @@ class MESH_OT_looper_rotate(bpy.types.Operator):
             return Vector((0.0, 0.0, 1.0))
         return local.normalized()
 
-    def _raycast(self, event):
-        """カーソル下の (ヒット座標, 面の法線, 面) をローカル空間で返す。"""
-        if self.bvh is None:
-            return None
+    def _cursor_ray(self, event):
+        """カーソルから伸びるレイを、オブジェクトのローカル空間で返す。"""
         co = (event.mouse_x - self.region.x, event.mouse_y - self.region.y)
         origin = view3d_utils.region_2d_to_origin_3d(self.region, self.rv3d, co)
         direction = view3d_utils.region_2d_to_vector_3d(self.region, self.rv3d, co)
-        # レイをローカル空間へ持ち込む。ここに留まる限り、法線を
+        # レイをローカル空間へ持ち込む。ここに留まる限り、面の法線を
         # 逆転置行列で変換する必要がない（非一様スケールでも壊れない）
-        o = self.mw_inv @ origin
-        d = (self.mw_inv.to_3x3() @ direction).normalized()
-        loc, nrm, idx, _dist = self.bvh.ray_cast(o, d)
-        if nrm is None or idx is None or idx >= len(self.snap_faces):
-            return None
-        return loc, nrm, self.snap_faces[idx]
-
-    def _pick_target_normal(self, event):
-        """スナップ先の法線（ローカル空間）。外していれば None。"""
-        self.snap_info = ""
-        hit = self._raycast(event)
-        if hit is None:
-            return None
-        loc, nrm, face = hit
-        if self.snap_type == 'FACE':
-            self.snap_info = "面に整列"
-            return nrm
-        # LOOP: 指した辺のエッジループに平面をフィットする
-        res = core.loop_plane_at(face, loc, blocked=self.moving)
-        if res is None:
-            self.snap_info = "ループを特定できません"
-            return None
-        normal, _center, n = res
-        self.snap_info = f"ループに整列 ({n} 頂点)"
-        return normal
+        return (self.mw_inv @ origin,
+                (self.mw_inv.to_3x3() @ direction).normalized())
 
     def _update_face_snap(self, event):
         """カーソル下のスナップ先へ揃える回転を求めて face_rot に入れる。
@@ -139,13 +114,14 @@ class MESH_OT_looper_rotate(bpy.types.Operator):
         姿勢を直接当てるのではなく (軸, 角度) へ逆算して持つので、
         確定後のリドゥも通常の回転とまったく同じ経路に乗る。
         """
-        normal = self._pick_target_normal(event)
-        if normal is None or self.cache.normal0 is None:
-            return
-        lock = self._local_axis() if self.axis_lock else None
-        res = core.rotation_to_normal(self.cache.normal0, normal, axis=lock)
-        if res is not None:
-            self.face_rot = res
+        origin, direction = self._cursor_ray(event)
+        rot, info = core.snap_rotation_from_ray(
+            self.bvh, self.snap_faces, origin, direction,
+            self.cache.normal0, snap_type=self.snap_type, moving=self.moving,
+            axis=self._local_axis() if self.axis_lock else None)
+        self.snap_info = info
+        if rot is not None:
+            self.face_rot = rot
 
     def _absolute_angle(self, angle=None):
         """今のループ平面が、拘束軸まわりで何度傾いているか（ワールド基準）。
@@ -249,23 +225,25 @@ class MESH_OT_looper_rotate(bpy.types.Operator):
         if self._face_snapping:
             what = "面" if self.snap_type == 'FACE' else "ループ"
             state = self.snap_info or f"{what}を指してください"
-            head = (f"[スナップ｜{state}]  {a}   "
+            head = (f"[スナップ:{what}｜{state}]  {a}   "
                     f"軸拘束: {self.axis_lock or 'なし'}   "
-                    f"[Ctrl を離すと通常の回転へ]")
+                    f"[S 切替  Ctrl を離すと通常の回転へ]")
         elif self.snapping:
             # スナップ中は状態が変わったことを一目で分かるようにし、
             # 常時ヒントは引っ込める（項目数を増やさない）
             step = math.degrees(self._snap_step())
-            head = (f"[スナップ {step:.0f}° 刻み]  {a}   軸: {axis}   "
-                    f"[Shift でさらに細かく  Ctrl を離すと通常の回転へ]")
+            head = (f"[スナップ:刻み {step:.0f}°]  {a}   軸: {axis}   "
+                    f"[S 切替  Shift でさらに細かく  Ctrl を離すと通常の回転へ]")
         else:
             ext = "ON" if self.extend else "OFF"
             m = "平面断面" if self.mode == "PLANE" else "最近点"
             num = "  A 絶対/相対" if self.axis_lock else ""
+            snap = {'INCREMENT': "刻み", 'FACE': "面", 'LOOP': "ループ"}[
+                self.snap_type]
             head = (f"{a}   軸: {axis}   "
-                    f"[X/Y/Z 拘束  Ctrl スナップ  Shift 精密{num}  "
+                    f"[X/Y/Z 拘束  Ctrl スナップ  S 切替  Shift 精密{num}  "
                     f"Enter 確定  Esc 中止]"
-                    f"      P:{m}  E:{ext}")
+                    f"      P:{m}  E:{ext}  Ctrl:{snap}")
 
         clamped = self.cache.last_clamped
         if clamped:
@@ -278,6 +256,15 @@ class MESH_OT_looper_rotate(bpy.types.Operator):
 
     # -- 実行 -------------------------------------------------------------
     def invoke(self, context, event):
+        # キーマップ（Alt+R）はプロパティを渡してこないので、そのままだと
+        # N パネルの設定が一切効かず、常に既定値で起動してしまう。
+        # 起動経路によらずパネルを唯一の設定元にする。
+        st = getattr(context.scene, "looper", None)
+        if st is not None:
+            self.mode = st.mode
+            self.extend = st.extend
+            self.snap_type = st.snap_type
+
         ob = context.edit_object
         self.me = ob.data
         self.bm = bmesh.from_edit_mesh(self.me)
@@ -376,6 +363,17 @@ class MESH_OT_looper_rotate(bpy.types.Operator):
             if ev == 'BACK_SPACE' and self.num_buf:
                 self.num_buf = self.num_buf[:-1]
                 self._commit_num()
+                self._apply(context)
+                return {'RUNNING_MODAL'}
+
+            if ev == 'S':
+                # スナップ先はモーダル中に変えたくなる。パネルまで戻らせない。
+                ids = [i[0] for i in ops.SNAP_ITEMS]
+                self.snap_type = ids[(ids.index(self.snap_type) + 1) % len(ids)]
+                self.face_rot = None
+                self.snap_info = ""
+                if self._face_snapping:
+                    self._update_face_snap(event)
                 self._apply(context)
                 return {'RUNNING_MODAL'}
 

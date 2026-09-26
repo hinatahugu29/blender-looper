@@ -561,3 +561,32 @@ def loop_plane_at(face, co, blocked=()):
         return None
     center = sum(pts, Vector()) / len(pts)
     return normal, center, len(pts)
+
+
+def snap_rotation_from_ray(bvh, faces, origin, direction, normal0,
+                           snap_type='FACE', moving=(), axis=None):
+    """レイの当たり先へループを揃える (軸, 角度) と、状態を表す文字列を返す。
+
+    モーダルから座標計算を切り離しておくための関数。bpy に触れないので、
+    ヘッドレスで実際にレイを飛ばして検証できる。
+
+    戻り値: ((軸, 角度) または None, 説明文)
+    """
+    if bvh is None or normal0 is None:
+        return None, ""
+    hit = bvh.ray_cast(origin, direction)
+    if hit is None:
+        return None, ""
+    loc, nrm, idx, _dist = hit
+    if nrm is None or idx is None or idx >= len(faces):
+        return None, ""
+
+    if snap_type == 'FACE':
+        target, info = nrm, "面に整列"
+    else:
+        res = loop_plane_at(faces[idx], loc, blocked=moving)
+        if res is None:
+            return None, "ループを特定できません"
+        target, info = res[0], f"ループに整列 ({res[2]} 頂点)"
+
+    return rotation_to_normal(normal0, target, axis=axis), info
