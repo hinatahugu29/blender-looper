@@ -159,10 +159,12 @@ class MESH_OT_looper_rotate(bpy.types.Operator):
     def _relative_for_absolute(self, target_abs):
         """絶対角度 target_abs にするために必要な、開始姿勢からの相対角度。
 
-        拘束軸まわりの傾きは加算的なので、開始時の絶対角度との差を取るだけ。
+        単純な引き算では非一様スケールのオブジェクトで外れる（絶対角度が
+        回転量に対して加算的でなくなる）ので、反復して解く。加算的な
+        通常のケースでは 1 回で厳密に決まる。
         """
-        base = self._absolute_angle(angle=0.0)
-        return None if base is None else target_abs - base
+        return core.solve_angle_for(
+            lambda a: self._absolute_angle(angle=a), target_abs)
 
     def _num_is_absolute(self):
         """数値入力を絶対角度として解釈するか。

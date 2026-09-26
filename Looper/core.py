@@ -610,3 +610,38 @@ def snap_rotation_from_ray(bvh, faces, origin, direction, normal0,
         preview = edge_segments(res[3])
 
     return rotation_to_normal(normal0, target, axis=axis), info, preview
+
+
+def solve_angle_for(measure, target, start=0.0, iters=32, tol=1e-9):
+    """measure(angle) が target になる angle をニュートン法で求める。
+
+    「絶対角度は回転量に対して加算的」という前提は、オブジェクトに
+    非一様スケールが掛かっていると成立しない。ローカル空間での軸回転が
+    ワールドでは剪断を伴い、角度が線形に対応しなくなるため。
+
+    差分をそのまま足す反復だと、感度 d(絶対角)/d(回転量) が 1 を超える
+    ケース（Z を 2 倍に潰した等）で振動して収束しない。数値微分で傾きを
+    見れば、加算的な通常のケースでは 1 回で厳密に決まり、そうでない場合も
+    収束する。
+
+    measure が None を返したら（軸と法線が平行で測れない）None。
+    """
+    h = 1e-4
+    max_step = math.pi / 4          # 折り返し付近で跳ねても暴走させない
+    angle = start
+    for _ in range(iters):
+        got = measure(angle)
+        if got is None:
+            return None
+        err = target - got
+        if abs(err) < tol:
+            return angle
+        nearby = measure(angle + h)
+        if nearby is None:
+            return None
+        slope = (nearby - got) / h
+        if abs(slope) < 1e-6:
+            return None             # この軸では目標に近づけない
+        step = err / slope
+        angle += max(-max_step, min(max_step, step))
+    return angle

@@ -633,6 +633,106 @@ def test_clamped_positions_are_recorded():
     cache.restore()
 
 
+# -- 絶対角度の解法（非一様スケールを含む） ----------------------------------
+#
+# モーダルの _absolute_angle / _relative_for_absolute と同じ式をここで組む。
+# 「絶対 0 度にしたのに平行にならない」を検出できるのはこの層。
+
+def _abs_measure(cache, mw, axis_world, reference):
+    """modal._absolute_angle と同じ測り方を返すクロージャ。"""
+    nrm = mw.to_3x3().inverted().transposed()
+    axis_local = (mw.to_3x3().inverted() @ axis_world).normalized()
+
+    def measure(angle):
+        local = core.rotation_matrix_about(
+            axis_local, angle, cache.pivot).to_3x3() @ cache.normal0
+        return core.absolute_plane_angle((nrm @ local).normalized(),
+                                         axis_world, reference)
+    return measure, axis_local, nrm
+
+
+def _abs_case(tilt_deg, target_deg, mw, label):
+    bm = make_cone(segments=12, cuts=3)
+    loop = loop_at_z(bm, 0.0)
+    ax_w, ref = Vector((1.0, 0.0, 0.0)), Vector((0.0, 0.0, 1.0))
+
+    pre = core.RailCache(loop)          # 傾いた状態から始める
+    pre.apply_matrix(core.rotation_matrix_about(
+        ax_w, math.radians(tilt_deg), pre.pivot), mode='PLANE')
+
+    cache = core.RailCache(loop)
+    measure, axis_local, nrm = _abs_measure(cache, mw, ax_w, ref)
+    rel = core.solve_angle_for(measure, math.radians(target_deg))
+    check(rel is not None, f"{label}: 解が求まる")
+    if rel is None:
+        return
+    cache.apply_matrix(core.rotation_matrix_about(axis_local, rel, cache.pivot),
+                       mode='PLANE')
+    n = core.fit_plane_normal([v.co.copy() for v in loop])
+    got = math.degrees(core.absolute_plane_angle((nrm @ n).normalized(),
+                                                 ax_w, ref))
+    check(abs(got - target_deg) < 1e-3,
+          f"{label}: 目標 {target_deg:+.0f}° → 実測 {got:+.4f}°")
+    cache.restore()
+
+
+def test_absolute_zero_makes_it_parallel():
+    print("[test] 絶対 0 度で XY 平面と平行になる")
+    I = Matrix.Identity(4)
+    for tilt in (20.0, -35.0, 60.0):
+        _abs_case(tilt, 0.0, I, f"{tilt:+.0f}° から 0°")
+
+    # 平行になったなら、ループの Z はすべて同じ高さのはず
+    bm = make_cone(segments=12, cuts=3)
+    loop = loop_at_z(bm, 0.0)
+    ax_w, ref = Vector((1.0, 0.0, 0.0)), Vector((0.0, 0.0, 1.0))
+    pre = core.RailCache(loop)
+    pre.apply_matrix(core.rotation_matrix_about(ax_w, math.radians(25.0),
+                                                pre.pivot), mode='PLANE')
+    cache = core.RailCache(loop)
+    measure, axis_local, _ = _abs_measure(cache, Matrix.Identity(4), ax_w, ref)
+    rel = core.solve_angle_for(measure, 0.0)
+    cache.apply_matrix(core.rotation_matrix_about(axis_local, rel, cache.pivot),
+                       mode='PLANE')
+    zs = [v.co.z for v in loop]
+    check(max(zs) - min(zs) < 1e-5,
+          f"ループの Z がそろう (幅 {max(zs) - min(zs):.3e})")
+    cache.restore()
+
+
+def test_absolute_survives_non_uniform_scale():
+    print("[test] 非一様スケールでも絶対角度が合う")
+    # 単純な引き算だと感度が 1 を超えて破綻する組み合わせ
+    _abs_case(20.0, 0.0, Matrix.Diagonal((1, 1, 2, 1)), "Zスケール2 → 0°")
+    _abs_case(20.0, 25.0, Matrix.Diagonal((1, 1, 2, 1)), "Zスケール2 → 25°")
+    _abs_case(20.0, 0.0, Matrix.Diagonal((3, 1, 0.5, 1)), "強い非一様 → 0°")
+    _abs_case(20.0, 0.0,
+              Matrix.Rotation(math.radians(30), 4, 'Y') @ Matrix.Diagonal((1, 2, 1, 1)),
+              "回転+非一様 → 0°")
+
+
+def test_solver_is_exact_when_additive():
+    print("[test] 加算的なケースでは 1 回で決まる")
+    calls = []
+
+    def measure(a):
+        calls.append(a)
+        return a - math.radians(10.0)
+
+    got = core.solve_angle_for(measure, 0.0)
+    check(abs(math.degrees(got) - 10.0) < 1e-9,
+          f"厳密解 ({math.degrees(got):.9f}°)")
+    check(len(calls) <= 3, f"評価回数が少ない ({len(calls)} 回)")
+
+
+def test_solver_gives_up_when_unreachable():
+    print("[test] 近づけない軸では解なしを返す")
+    check(core.solve_angle_for(lambda a: None, 0.0) is None,
+          "測れない場合は None")
+    check(core.solve_angle_for(lambda a: 0.5, 0.0) is None,
+          "角度を変えても動かないなら None")
+
+
 def run_all():
     for fn in (test_rotation_to_normal_free, test_rotation_to_normal_sign,
                test_rotation_to_normal_constrained, test_snap_angle,
@@ -654,7 +754,11 @@ def run_all():
                test_snap_from_ray_respects_axis_lock,
                test_snap_type_ids_match_ui,
                test_preview_segments_describe_the_target,
-               test_clamped_positions_are_recorded):
+               test_clamped_positions_are_recorded,
+               test_absolute_zero_makes_it_parallel,
+               test_absolute_survives_non_uniform_scale,
+               test_solver_is_exact_when_additive,
+               test_solver_gives_up_when_unreachable):
         fn()
 
 
