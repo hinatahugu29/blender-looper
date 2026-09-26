@@ -207,51 +207,70 @@ class MESH_OT_looper_rotate(bpy.types.Operator):
         bmesh.update_edit_mesh(self.me, loop_triangles=False, destructive=False)
         self._header(context)
 
-    def _header(self, context):
-        if self.num_buf:
-            label = "絶対角度" if self._num_is_absolute() else "角度"
-            a = f"{label}: [{self.num_buf}]"
-        else:
-            a = f"角度: {math.degrees(self._current_rotation()[1]):+.2f}°"
-        axis = self.axis_lock if self.axis_lock else "ビュー"
+    def _snap_label(self):
+        return {'INCREMENT': "刻み", 'FACE': "面", 'LOOP': "ループ"}[
+            self.snap_type]
 
-        # 絶対角度は「今何度なのか」が分からないと指定しようがないので、
-        # 拘束中は常に見えるようにしておく
+    def _header(self, context):
+        """ヘッダには「毎フレーム変わる値」と「今の状態」だけを置く。
+
+        キー一覧はステータスバーへ回す（Blender 標準の R / G と同じ構成）。
+        不変のヒントが値と同じ行に並んでいると、一番読みたい角度が埋もれる。
+        """
+        if self.num_buf:
+            label = "絶対" if self._num_is_absolute() else "回転"
+            a = f"{label} [{self.num_buf}]"
+        else:
+            # 符号と桁で幅が動くと数字が左右に揺れて読みづらいので幅を固定する
+            a = f"回転 {math.degrees(self._current_rotation()[1]):+8.2f}°"
+
         abs_a = self._absolute_angle()
         if abs_a is not None:
             ref = "YZ" if self.axis_lock == 'Z' else "XY"
-            a += f"   絶対: {math.degrees(abs_a):+.2f}° ({ref}平面から)"
+            a += f"   絶対 {math.degrees(abs_a):+8.2f}° ({ref})"
+
+        axis = f"軸 {self.axis_lock}" if self.axis_lock else "軸 ビュー"
 
         if self._face_snapping:
-            what = "面" if self.snap_type == 'FACE' else "ループ"
+            what = self._snap_label()
             state = self.snap_info or f"{what}を指してください"
-            head = (f"[スナップ:{what}｜{state}]  {a}   "
-                    f"軸拘束: {self.axis_lock or 'なし'}   "
-                    f"[S 切替  Ctrl を離すと通常の回転へ]")
+            head = f"[{what}スナップ] {state}   {a}   {axis}"
         elif self.snapping:
-            # スナップ中は状態が変わったことを一目で分かるようにし、
-            # 常時ヒントは引っ込める（項目数を増やさない）
             step = math.degrees(self._snap_step())
-            head = (f"[スナップ:刻み {step:.0f}°]  {a}   軸: {axis}   "
-                    f"[S 切替  Shift でさらに細かく  Ctrl を離すと通常の回転へ]")
+            head = f"[刻み {step:.0f}°]   {a}   {axis}"
         else:
-            ext = "ON" if self.extend else "OFF"
+            ext = "越境ON" if self.extend else "越境OFF"
             m = "平面断面" if self.mode == "PLANE" else "最近点"
-            num = "  A 絶対/相対" if self.axis_lock else ""
-            snap = {'INCREMENT': "刻み", 'FACE': "面", 'LOOP': "ループ"}[
-                self.snap_type]
-            head = (f"{a}   軸: {axis}   "
-                    f"[X/Y/Z 拘束  Ctrl スナップ  S 切替  Shift 精密{num}  "
-                    f"Enter 確定  Esc 中止]"
-                    f"      P:{m}  E:{ext}  Ctrl:{snap}")
+            head = (f"{a}   {axis}   Ctrl:{self._snap_label()}"
+                    f"   {m} · {ext}")
 
         clamped = self.cache.last_clamped
         if clamped:
-            head += f"      ※ {clamped} 頂点がレール端で止まり平面に届いていません"
+            head += f"   ※ {clamped} 頂点が平面に届いていません"
         context.area.header_text_set(head)
+        self._status(context)
+
+    def _status(self, context):
+        """キー一覧はステータスバーへ。状態が変わったときだけ書き換える。"""
+        if self._face_snapping:
+            keys = ("カーソルで対象を指す", "S スナップ先", "X/Y/Z 軸拘束",
+                    "Ctrl を離すと通常の回転")
+        elif self.snapping:
+            keys = ("Shift 1°刻み", "S スナップ先", "X/Y/Z 軸拘束",
+                    "Ctrl を離すと通常の回転")
+        else:
+            keys = ("X/Y/Z 軸拘束", "Ctrl スナップ", "S スナップ先",
+                    "Shift 精密", "数値 角度入力",
+                    *(("A 絶対/相対",) if self.axis_lock else ()),
+                    "P モード", "E 越境", "Enter 確定", "Esc 中止")
+        text = "  |  ".join(keys)
+        if text != self.status_text:
+            self.status_text = text
+            context.workspace.status_text_set(text)
 
     def _finish(self, context):
         context.area.header_text_set(None)
+        context.workspace.status_text_set(None)
         context.window.cursor_modal_restore()
 
     # -- 実行 -------------------------------------------------------------
@@ -302,6 +321,7 @@ class MESH_OT_looper_rotate(bpy.types.Operator):
         self.snap_fine = False
         self.face_rot = None
         self.snap_info = ""
+        self.status_text = None
         self.num_absolute = True
         self.moving = set(sel)
         self.mw_inv = ob.matrix_world.inverted()
